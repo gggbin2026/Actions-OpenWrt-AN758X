@@ -60,16 +60,7 @@ on:
         options:
           - fiberhome_hg5585f-cu
           - fiberhome_hg5585f-ct
-          - fiberhome_hg5382a
-          - gemtek_xg2010g
           - nokia_xg-040g-md-ubi
-          - nokia_xg-040g-tf-ubi
-          - unionman_ung00a
-          - znxt_zn504xg-d
-          - znxt_zn515xg-d
-          - h3c_hm2004-du
-          - nokia_xg-040g-mf
-          - nokia_xg-040g-mf-ubi
           - all
       scope:
         description: '构建范围 (toolchain-only 仅预热工具链缓存)'
