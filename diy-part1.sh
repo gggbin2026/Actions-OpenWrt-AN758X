@@ -36,7 +36,7 @@ ADD_OWQ_WOL=false      # luci-app-owq-wol（网络唤醒，依赖 etherwake）
 ADD_WATCHDOG=false     # luci-app-watchdog（看门狗，包在子目录，需特殊处理）
 ADD_TASKPLAN=false     # luci-app-taskplan（定时任务）
 ADD_OAF=false          # luci-app-oaf（应用过滤，含内核模块，高风险）
-ADD_NETSPEEDTEST=false  # luci-app-netspeedtest（内网/外网测速，带 LuCI 菜单）
+ADD_NETSPEEDTEST=true  # luci-app-netspeedtest（内网/外网测速，带 LuCI 菜单）
 ADD_ISTORE=true
 ADD_USB_PRINTER_LUCI=true
 
@@ -254,6 +254,13 @@ done
 #
 #   ⚠️ 判据是 tmp/.packageinfo，不是 package/feeds/custom
 #
+
+# --- USB 打印（siwind 第三方）---        ← 从这里开始加
+if [ "$ADD_USB_PRINTER_LUCI" = "true" ]; then
+  clone https://github.com/siwind/luci-app-usb-printer "$PKG_DIR/luci-app-usb-printer" main
+fi
+
+
 #   OpenWrt 的 prepare-tmpinfo 直接扫 package/ 目录树：
 #     include/scan.mk:  find -L package -mindepth 1 -maxdepth 5 -name Makefile
 #   package/custom/<pkg>/Makefile 深度只有 3，本来就会被扫到，
@@ -338,11 +345,6 @@ fi
 if [ "$ADD_SMARTDNS" = "true" ]; then
   clone https://github.com/pymumu/luci-app-smartdns "$PKG_DIR/luci-app-smartdns" master
   clone https://github.com/pymumu/smartdns "$PKG_DIR/smartdns" master
-fi
-
-# --- USB 打印（siwind 第三方）---        ← 从这里开始加
-if [ "$ADD_USB_PRINTER_LUCI" = "true" ]; then
-  clone https://github.com/siwind/luci-app-usb-printer "$PKG_DIR/luci-app-usb-printer" main
 fi
 
 
