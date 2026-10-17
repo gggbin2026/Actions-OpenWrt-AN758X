@@ -38,6 +38,7 @@ ADD_TASKPLAN=false     # luci-app-taskplan（定时任务）
 ADD_OAF=false          # luci-app-oaf（应用过滤，含内核模块，高风险）
 ADD_NETSPEEDTEST=false  # luci-app-netspeedtest（内网/外网测速，带 LuCI 菜单）
 ADD_ISTORE=true
+ADD_USB_PRINTER_LUCI=true
 
 ADD_LUCI_APP=true       # qwe3017/luci-app 仓库（monorepo）
                         #   ├─ luci-app-natmode     NAT 类型三选一（网络 → NAT 类型）
@@ -333,6 +334,18 @@ else
   echo "未启用任何第三方插件"
 fi
 
+# --- smartdns ---
+if [ "$ADD_SMARTDNS" = "true" ]; then
+  clone https://github.com/pymumu/luci-app-smartdns "$PKG_DIR/luci-app-smartdns" master
+  clone https://github.com/pymumu/smartdns "$PKG_DIR/smartdns" master
+fi
+
+# --- USB 打印（siwind 第三方）---        ← 从这里开始加
+if [ "$ADD_USB_PRINTER_LUCI" = "true" ]; then
+  clone https://github.com/siwind/luci-app-usb-printer "$PKG_DIR/luci-app-usb-printer" main
+fi
+
+
 # --- 网络测速（sirpdboy/netspeedtest）---
 #
 # 网页版内网测速 = homebox，外网测速 = ookla-speedtest，LuCI 菜单 = luci-app-netspeedtest。
@@ -363,6 +376,7 @@ if [ "$ADD_NETSPEEDTEST" = "true" ]; then
 
   rm -rf "$NS_TMP"
 fi
+
 
 
 echo "🎉 diy-part1.sh 执行完毕"
