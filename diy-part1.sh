@@ -36,7 +36,7 @@ ADD_OWQ_WOL=false      # luci-app-owq-wol（网络唤醒，依赖 etherwake）
 ADD_WATCHDOG=false     # luci-app-watchdog（看门狗，包在子目录，需特殊处理）
 ADD_TASKPLAN=false     # luci-app-taskplan（定时任务）
 ADD_OAF=false          # luci-app-oaf（应用过滤，含内核模块，高风险）
-ADD_NETSPEEDTEST=false
+ADD_NETSPEEDTEST=false  # luci-app-netspeedtest（内网/外网测速，带 LuCI 菜单）
 ADD_LUCI_APP=true       # qwe3017/luci-app 仓库（monorepo）
                         #   ├─ luci-app-natmode     NAT 类型三选一（网络 → NAT 类型）
                         #   └─ luci-app-pon-status  PON 光模块卡片（概览页「系统」下一格）
@@ -320,5 +320,38 @@ if [ -n "$(ls -A "$PKG_DIR" 2>/dev/null)" ]; then
 else
   echo "未启用任何第三方插件"
 fi
+
+# --- 网络测速（sirpdboy/netspeedtest）---
+#
+# 网页版内网测速 = homebox，外网测速 = ookla-speedtest，LuCI 菜单 = luci-app-netspeedtest。
+# 这三个包都在同一个仓库里（不是 ImmortalWrt 官方 feed），必须成套拷贝：
+#   luci-app-netspeedtest -> ookla-speedtest + homebox + python3-light + python3-pkg-resources
+#                            + python3-xml + python3-email + python3-urllib + python3-codecs
+#                            + python3-openssl + jq + iperf3(或 iperf3-ssl)
+#   homebox / ookla-speedtest 都是预编译二进制，aarch64 原生支持，不触发 Go 工具链。
+#
+# 目录名即包名（luci.mk: PKG_NAME ?= $(notdir ${CURDIR})），不能改。
+if [ "$ADD_NETSPEEDTEST" = "true" ]; then
+  NS_TMP="$(mktemp -d)/netspeedtest"
+
+  if ! clone https://github.com/sirpdboy/netspeedtest "$NS_TMP" main; then
+    echo "::error::sirpdboy/netspeedtest 拉取失败，luci-app-netspeedtest 会被 defconfig 剔除"
+    exit 1
+  fi
+
+  for p in luci-app-netspeedtest homebox ookla-speedtest; do
+    if [ ! -f "$NS_TMP/$p/Makefile" ]; then
+      echo "::error::$NS_TMP/$p/Makefile 不存在，包无法被索引"
+      exit 1
+    fi
+    rm -rf "$PKG_DIR/$p"
+    cp -r "$NS_TMP/$p" "$PKG_DIR/"
+    echo "✅ 已拷贝: $p  (版本 $(grep -m1 '^PKG_VERSION' "$PKG_DIR/$p/Makefile" 2>/dev/null | sed 's/PKG_VERSION:=//'))"
+  done
+
+  rm -rf "$NS_TMP"
+fi
+
+
 
 echo "🎉 diy-part1.sh 执行完毕"
