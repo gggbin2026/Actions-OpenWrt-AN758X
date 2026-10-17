@@ -37,7 +37,7 @@ ADD_WATCHDOG=false     # luci-app-watchdog（看门狗，包在子目录，需�
 ADD_TASKPLAN=false     # luci-app-taskplan（定时任务）
 ADD_OAF=false          # luci-app-oaf（应用过滤，含内核模块，高风险）
 ADD_NETSPEEDTEST=false  # luci-app-netspeedtest（内网/外网测速，带 LuCI 菜单）
-ADD_ISTORE=false
+ADD_ISTORE=true
 
 ADD_LUCI_APP=true       # qwe3017/luci-app 仓库（monorepo）
                         #   ├─ luci-app-natmode     NAT 类型三选一（网络 → NAT 类型）
@@ -90,22 +90,14 @@ if [ "$ADD_LUCI_APP" = "true" ]; then
   rm -rf "$LUCI_APP_TMP"
 fi
 
-if [ "$ADD_ISTORE" = "true" ]; then
-  if ! grep -qE '^src-git[[:space:]]+istore[[:space:]]' feeds.conf.default 2>/dev/null; then
-    [ -s feeds.conf.default ] && [ -n "$(tail -c1 feeds.conf.default)" ] && echo >> feeds.conf.default
+# --- iStore 软件中心 ---
+if [ "${ADD_ISTORE:-false}" = "true" ]; then
+  # ponwrt 自带 feeds.conf.default 里有 pon_drivers / pon_userspace，
+  # 只能追加，不能覆盖，否则 PON 包全丢
+  grep -q 'linkease/istore' feeds.conf.default 2>/dev/null || \
     echo 'src-git istore https://github.com/linkease/istore;main' >> feeds.conf.default
-  fi
-
-  ./scripts/feeds update istore 2>&1 | tail -5
-  for p in luci-app-store luci-lib-taskd luci-lib-xterm taskd; do
-    ./scripts/feeds install -d y -p istore "$p" 2>&1 | tail -2
-  done
-
-  for p in luci-app-store luci-lib-taskd luci-lib-xterm taskd; do
-    [ -e "package/feeds/istore/$p/Makefile" ] \
-      && echo "✅ $p 已安装" \
-      || echo "::warning::$p 未安装到 package/feeds/istore"
-  done
+  ./scripts/feeds update istore
+  ./scripts/feeds install -d y -p istore luci-app-store
 fi
 
 # --- Airoha SoC 状态页（NPU 卸载 / CPU 频率 / Frame Engine / PPE 流表）---
