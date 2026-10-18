@@ -90,6 +90,17 @@ if [ "$ADD_LUCI_APP" = "true" ]; then
   rm -rf "$LUCI_APP_TMP"
 fi
 
+# --- USB 打印（siwind 第三方）---
+if [ "$ADD_USB_PRINTER_LUCI" = "true" ]; then
+  clone https://github.com/siwind/luci-app-usb-printer "$PKG_DIR/luci-app-usb-printer" main
+
+  # po 文件名必须等于 LUCI_BASENAME（usb-printer），否则中文 lmo 前端找不到
+  for d in "$PKG_DIR/luci-app-usb-printer"/po/*/; do
+    [ -f "$d/usb_printer.po" ] && mv "$d/usb_printer.po" "$d/usb-printer.po"
+  done
+fi
+
+
 # --- iStore 软件中心 ---
 if [ "${ADD_ISTORE:-false}" = "true" ]; then
   # ponwrt 自带 feeds.conf.default 里有 pon_drivers / pon_userspace，
