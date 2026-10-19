@@ -373,6 +373,9 @@ if [ -n "$(ls -A "$PKG_DIR" 2>/dev/null)" ]; then
   if [ "$ADD_LUCI_APP" = "true" ]; then
     REQUIRED="$REQUIRED luci-app-natmode luci-app-pon-status"
   fi
+  if [ "$ADD_ISTORE" = "true" ]; then
+    REQUIRED="$REQUIRED luci-app-store luci-lib-taskd luci-lib-xterm taskd"
+  fi
   HARD_MISS=""
   for r in $REQUIRED; do
     grep -qx "Package: $r" tmp/.packageinfo 2>/dev/null || HARD_MISS="$HARD_MISS $r"
