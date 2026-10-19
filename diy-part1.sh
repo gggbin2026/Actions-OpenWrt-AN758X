@@ -101,14 +101,50 @@ if [ "$ADD_USB_PRINTER_LUCI" = "true" ]; then
 fi
 
 
-# --- iStore 软件中心 ---
-if [ "${ADD_ISTORE:-false}" = "true" ]; then
-  # ponwrt 自带 feeds.conf.default 里有 pon_drivers / pon_userspace，
-  # 只能追加，不能覆盖，否则 PON 包全丢
-  grep -q 'linkease/istore' feeds.conf.default 2>/dev/null || \
-    echo 'src-git istore https://github.com/linkease/istore;main' >> feeds.conf.default
-  ./scripts/feeds update istore
-  ./scripts/feeds install -d y -p istore luci-app-store
+# =========================================================
+# iStore 软件中心（易有云 / LinkEase）
+#
+# 官方 README 给的是 feed 方式：
+#   echo 'src-git istore https://github.com/linkease/istore;main' >> feeds.conf.default
+#   ./scripts/feeds update istore
+#   ./scripts/feeds install -d y -p istore luci-app-store
+#
+# ⚠️ 这里刻意**不照抄**，改用和 ADD_LUCI_APP 一样的「clone 整仓 + 拷子目录」：
+#   ① 官方那条命令只装 luci-app-store 一个包，但依赖链是三层的
+#      luci-app-store -> luci-lib-taskd -> luci-lib-xterm + taskd
+#      taskd 是普通 C 包（不在 luci feed 里），不显式装就没人拉它，
+#      defconfig 判定依赖不满足 → luci-app-store=y 被静默剔除（上次没编进去的主因）。
+#   ② 本脚本顶部的注释已经写清楚：package/custom/<pkg>/Makefile 深度为 3，
+#      buildroot 的 scan.mk 直接扫得到，**根本不需要注册 feed**；
+#      而 feeds install 建链接失败时不会报错，排查成本高。
+#   ③ feed 装出来的包落在 package/feeds/istore/，本脚本重建索引的判据是
+#      package/custom 是否非空 —— 只开 iStore 时会跳过重建，符号进不了索引。
+#
+# ⚠️ 官方说「19.07+ 需要 luci-compat」—— 那是老 LuCI 的说法。
+#    ImmortalWrt 24.x 的 luci feed 里已无此包，千万别写
+#    CONFIG_PACKAGE_luci-compat=y，否则符号不存在照样被剔除。
+# =========================================================
+if [ "$ADD_ISTORE" = "true" ]; then
+  ISTORE_URL="https://github.com/linkease/istore"
+  ISTORE_TMP="$(mktemp -d)/istore"
+
+  if ! clone "$ISTORE_URL" "$ISTORE_TMP" main; then
+    echo "::error::linkease/istore 拉取失败，iStore 会被 defconfig 剔除"
+    exit 1
+  fi
+
+  # 4 个包成套，目录名必须等于包名（luci.mk: PKG_NAME ?= $(notdir ${CURDIR})）
+  for p in luci-app-store luci-lib-taskd luci-lib-xterm taskd; do
+    if [ ! -f "$ISTORE_TMP/luci/$p/Makefile" ]; then
+      echo "::error::$ISTORE_TMP/luci/$p/Makefile 不存在，包无法被索引"
+      exit 1
+    fi
+    rm -rf "$PKG_DIR/$p"
+    cp -r "$ISTORE_TMP/luci/$p" "$PKG_DIR/"
+    echo "✅ 已拷贝: $p  (版本 $(grep -m1 '^PKG_VERSION' "$PKG_DIR/$p/Makefile" 2>/dev/null | sed 's/PKG_VERSION:=//'))"
+  done
+
+  rm -rf "$ISTORE_TMP"
 fi
 
 # --- Airoha SoC 状态页（NPU 卸载 / CPU 频率 / Frame Engine / PPE 流表）---
