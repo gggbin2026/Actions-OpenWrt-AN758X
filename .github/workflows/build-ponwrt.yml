@@ -849,11 +849,16 @@ jobs:
           # 这里显式确认 PON 核心链路还在，否则编出来光口不通
           # =========================================================
           MISSING=""
-          for p in kmod-airoha-xpon kmod-airoha-pon-frontend airoha-pond airoha-ponctl luci-app-pon; do
+          for p in kmod-airoha-xpon kmod-airoha-pon-frontend airoha-pond airoha-ponctl; do
             if ! grep -q "^CONFIG_PACKAGE_${p}=y" .config; then
               MISSING="$MISSING $p"
             fi
           done
+          # ONU 菜单：改造后的机型用 luci-app-onu，未改造的 SoC 配置仍可能是旧名
+          if ! grep -q "^CONFIG_PACKAGE_luci-app-onu=y" .config &&
+             ! grep -q "^CONFIG_PACKAGE_luci-app-pon=y" .config; then
+            MISSING="$MISSING ONU-LuCI(luci-app-onu/luci-app-pon)"
+          fi
           if [ -n "$MISSING" ]; then
             echo "::error::以下关键包在 defconfig 后未启用，检查 feeds 是否完整:$MISSING"
             exit 1
