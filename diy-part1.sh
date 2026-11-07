@@ -47,6 +47,7 @@ ADD_LUCI_APP=true       # qwe-qaq/luci-app 仓库（monorepo）
                         #   └─ luci-app-pon-status  PON 光模块卡片（概览页「系统」下一格）
 ADD_ONU=true            # ★ naoki66/OpenWrt_ONU_CONFIG：顶级 ONU 菜单（替代旧 luci-app-pon）
 APPLY_ONU_FW4_PATCH=true # 可选：firewall4 flowtable 补丁（失败仅警告，不阻断编译）
+ADD_RTP2HTTPD=true      # ★ stackia/rtp2httpd v3.17.2（替代 ImmortalWrt feed 的 3.16.0）
 # 下面这几个开关都能被环境变量覆盖（: ${VAR:=默认} 的写法）：
 # workflow 里选了「不拉私有仓库」时会注入 ADD_FTTR=false，整段直接跳过。
 : "${ADD_FTTR:=true}"       # FTTR 全家桶总开关（下面的子开关都受它管）★仅 HM2004-DU
@@ -163,6 +164,50 @@ if [ "$ADD_ONU" = "true" ]; then
     fi
   fi
   rm -rf "$ONU_TMP"
+fi
+
+# =========================================================
+# ★ rtp2httpd 新版 —— stackia 官方 v3.17.2
+#
+# 旧版来自 ImmortalWrt feeds：
+#   feeds/packages/net/rtp2httpd                 (3.16.0)
+#   feeds/luci/applications/luci-app-rtp2httpd  (3.16.0 的 JS 前端)
+# 官方最新是 v3.17.2（FCC 快速换台 / 内置 Web 播放器 / 状态页 / RTSP 回看）。
+#
+# ⚠ 包名完全一样，绝不能两份同时进索引。这里删掉 feed 里的旧包（含 i18n
+#   符号链接），把官方 openwrt-support/ 下的两个包放进 package/custom。
+# ⚠ 必须用 Makefile.versioned：普通 Makefile 靠 git describe 取版本号，
+#   且 Build/Prepare 从 $(CURDIR)/../.. 拷源码，脱离原仓库就编译不了。
+#   versioned 版固定 3.17.2 + PKG_HASH，从 codeload 拉源码，可独立编译。
+# =========================================================
+if [ "$ADD_RTP2HTTPD" = "true" ]; then
+  R2H_URL="https://github.com/stackia/rtp2httpd"
+  R2H_TAG="v3.17.2"
+  R2H_TMP="$(mktemp -d)/rtp2httpd"
+  if ! clone "$R2H_URL" "$R2H_TMP" "$R2H_TAG"; then
+    echo "::error::stackia/rtp2httpd v3.17.2 拉取失败，将回退到 feed 的旧版"
+    exit 1
+  fi
+
+  # 清掉旧包：feed 目录 + package/feeds 符号链接 + 旧 i18n 链接
+  rm -rf feeds/packages/net/rtp2httpd \
+         feeds/luci/applications/luci-app-rtp2httpd \
+         "$PKG_DIR/rtp2httpd" "$PKG_DIR/luci-app-rtp2httpd"
+  find package/feeds -maxdepth 3 \( \
+      -name 'rtp2httpd' -o -name 'luci-app-rtp2httpd' -o -name 'luci-i18n-rtp2httpd-*' \
+    \) -exec rm -rf {} + 2>/dev/null || true
+
+  for p in rtp2httpd luci-app-rtp2httpd; do
+    SRC_DIR="$R2H_TMP/openwrt-support/$p"
+    if [ ! -f "$SRC_DIR/Makefile.versioned" ]; then
+      echo "::error::$SRC_DIR/Makefile.versioned 不存在（上游改结构了？）"
+      exit 1
+    fi
+    cp -a "$SRC_DIR" "$PKG_DIR/$p"
+    cp -a "$SRC_DIR/Makefile.versioned" "$PKG_DIR/$p/Makefile"
+    echo "✅ rtp2httpd: 已放入 $p (v3.17.2)"
+  done
+  rm -rf "$R2H_TMP"
 fi
 
 # =========================================================
@@ -575,6 +620,7 @@ if [ -n "$(ls -A "$PKG_DIR" 2>/dev/null)" ]; then
     REQUIRED="$REQUIRED luci-app-natmode luci-app-pon-status"
   fi
   [ "$ADD_ONU" = "true" ] && REQUIRED="$REQUIRED luci-app-onu"
+  [ "$ADD_RTP2HTTPD" = "true" ] && REQUIRED="$REQUIRED rtp2httpd luci-app-rtp2httpd"
 
   # 与 configs/an7581.config / an7583.config 里 =y 的包一一对应。
   # 任一项没进索引，defconfig 都会把那个 =y 静默剔除 —— 编出来的固件少了菜单
