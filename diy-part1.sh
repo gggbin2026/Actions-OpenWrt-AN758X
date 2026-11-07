@@ -45,6 +45,8 @@ ADD_OAF=true           # luci-app-oaf（应用过滤，含内核模块，高风�
 ADD_LUCI_APP=true       # qwe-qaq/luci-app 仓库（monorepo）
                         #   ├─ luci-app-natmode     NAT 类型三选一（网络 → NAT 类型）
                         #   └─ luci-app-pon-status  PON 光模块卡片（概览页「系统」下一格）
+ADD_ONU=true            # ★ naoki66/OpenWrt_ONU_CONFIG：顶级 ONU 菜单（替代旧 luci-app-pon）
+APPLY_ONU_FW4_PATCH=true # 可选：firewall4 flowtable 补丁（失败仅警告，不阻断编译）
 # 下面这几个开关都能被环境变量覆盖（: ${VAR:=默认} 的写法）：
 # workflow 里选了「不拉私有仓库」时会注入 ADD_FTTR=false，整段直接跳过。
 : "${ADD_FTTR:=true}"       # FTTR 全家桶总开关（下面的子开关都受它管）★仅 HM2004-DU
@@ -104,6 +106,63 @@ if [ "$ADD_LUCI_APP" = "true" ]; then
     echo "✅ 已拷贝: $p  (版本 $(grep -m1 '^PKG_VERSION' "$PKG_DIR/$p/Makefile" 2>/dev/null | sed 's/PKG_VERSION:=//'))"
   done
   rm -rf "$LUCI_APP_TMP"
+fi
+
+# =========================================================
+# ★ naoki66/OpenWrt_ONU_CONFIG —— 顶级 ONU 菜单（重构版 PON 用户态）
+#
+# 源码 pbs05/ponwrt 自带的 pon_userspace feed 是旧栈：
+#   luci-app-pon + luci-app-iptv + airoha-pon-daemons / ponctl / pon-debug
+# naoki66 是它的 fork 重构版：
+#   · luci-app-pon  → 改名 luci-app-onu，提升为顶级菜单
+#   · luci-app-iptv → 吸收进 luci-app-onu（onu-internet / onu-iptv / onu-voice）
+#   · airoha-pond / ponctl / debug 同步重构（auth_mode、完整简体中文等）
+#   · 新增 luci-app-pon-status（概览页 PON 卡片）
+#
+# ⚠ 同名包不能两份同时进索引（package-metadata 会挑错）。所以：
+#   ① 删掉 feeds/pon_userspace 里的旧同名包及 package/feeds 符号链接；
+#   ② 把新版 5 个包全部放进 package/custom/，由 prepare-tmpinfo 扫描；
+#   ③ 覆盖 ADD_LUCI_APP 拷进来的旧版 luci-app-pon-status。
+# =========================================================
+if [ "$ADD_ONU" = "true" ]; then
+  ONU_URL="https://github.com/naoki66/OpenWrt_ONU_CONFIG"
+  ONU_TMP="$(mktemp -d)/OpenWrt_ONU_CONFIG"
+  if ! clone "$ONU_URL" "$ONU_TMP" main; then
+    echo "::error::naoki66/OpenWrt_ONU_CONFIG 拉取失败，luci-app-onu 会被 defconfig 剔除"
+    exit 1
+  fi
+
+  for p in airoha-pon-daemons airoha-ponctl airoha-pon-debug luci-app-pon luci-app-iptv; do
+    rm -rf "feeds/pon_userspace/$p" "package/feeds/pon_userspace/$p"
+  done
+  rm -rf "$PKG_DIR/luci-app-pon-status" "package/feeds/custom/luci-app-pon-status"
+
+  for p in airoha-pon-daemons airoha-ponctl airoha-pon-debug luci-app-onu luci-app-pon-status; do
+    if [ ! -f "$ONU_TMP/$p/Makefile" ]; then
+      echo "::error::$ONU_TMP/$p/Makefile 不存在（上游改了目录结构？）"
+      exit 1
+    fi
+    rm -rf "$PKG_DIR/$p"
+    cp -a "$ONU_TMP/$p" "$PKG_DIR/$p"
+    echo "✅ ONU: 已拷贝 $p"
+  done
+
+  # 可选：firewall4 flowtable 补丁（PPPoE / VLAN 上联的硬件卸载）。
+  # 失败只 warning —— ONU 菜单照常能编出来，不阻断本步骤。
+  if [ "$APPLY_ONU_FW4_PATCH" = "true" ]; then
+    ONU_PATCH="$ONU_TMP/patches/firewall4/010-fw4-zone-device-flowtable.patch"
+    FW4_DIR="$(find feeds package -maxdepth 6 -type d -name firewall4 -print -quit 2>/dev/null)"
+    if [ -f "$ONU_PATCH" ] && [ -n "$FW4_DIR" ] && [ -f "$FW4_DIR/root/usr/share/ucode/fw4.uc" ]; then
+      if (cd "$FW4_DIR" && git apply --check "$ONU_PATCH" 2>/dev/null); then
+        (cd "$FW4_DIR" && git apply "$ONU_PATCH") && echo "✅ ONU: 已应用 firewall4 flowtable 补丁"
+      else
+        echo "::warning::firewall4 补丁不适用当前源码（版本差异），跳过；ONU 菜单不受影响"
+      fi
+    else
+      echo "::warning::未找到 firewall4/fw4.uc 或补丁文件，跳过 flowtable 补丁"
+    fi
+  fi
+  rm -rf "$ONU_TMP"
 fi
 
 # =========================================================
@@ -515,6 +574,7 @@ if [ -n "$(ls -A "$PKG_DIR" 2>/dev/null)" ]; then
   if [ "$ADD_LUCI_APP" = "true" ]; then
     REQUIRED="$REQUIRED luci-app-natmode luci-app-pon-status"
   fi
+  [ "$ADD_ONU" = "true" ] && REQUIRED="$REQUIRED luci-app-onu"
 
   # 与 configs/an7581.config / an7583.config 里 =y 的包一一对应。
   # 任一项没进索引，defconfig 都会把那个 =y 静默剔除 —— 编出来的固件少了菜单
