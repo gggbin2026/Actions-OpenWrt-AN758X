@@ -48,6 +48,7 @@ ADD_LUCI_APP=true       # qwe-qaq/luci-app 仓库（monorepo）
 ADD_ONU=true            # ★ naoki66/OpenWrt_ONU_CONFIG：顶级 ONU 菜单（替代旧 luci-app-pon）
 APPLY_ONU_FW4_PATCH=true # 可选：firewall4 flowtable 补丁（失败仅警告，不阻断编译）
 ADD_RTP2HTTPD=true      # ★ stackia/rtp2httpd v3.17.2（替代 ImmortalWrt feed 的 3.16.0）
+ADD_ISTORE=true         # ★ linkease/istore：iStore 软件中心（feed 方式集成）
 # 下面这几个开关都能被环境变量覆盖（: ${VAR:=默认} 的写法）：
 # workflow 里选了「不拉私有仓库」时会注入 ADD_FTTR=false，整段直接跳过。
 : "${ADD_FTTR:=true}"       # FTTR 全家桶总开关（下面的子开关都受它管）★仅 HM2004-DU
@@ -208,6 +209,68 @@ if [ "$ADD_RTP2HTTPD" = "true" ]; then
     echo "✅ rtp2httpd: 已放入 $p (v3.17.2)"
   done
   rm -rf "$R2H_TMP"
+fi
+
+# =========================================================
+# ★ iStore 软件中心 —— linkease/istore feed
+#
+# 官方集成命令（README）：
+#   echo >> feeds.conf.default
+#   echo 'src-git istore https://github.com/linkease/istore;main' >> feeds.conf.default
+#   ./scripts/feeds update istore
+#   ./scripts/feeds install -d y -p istore luci-app-store
+#
+# ⚠ 绝不能用 workflow 的 FEEDS_CONF 变量来做这件事：它是「整份 cp 覆盖」
+#   feeds.conf.default，而上游 pbs05/ponwrt 的 feeds.conf.default 里有
+#   pon_drivers / pon_userspace 两个 PON 专用 feed（v2 的 ONU 菜单全靠它们）。
+#   覆盖掉会直接让 PON 包全部消失。这里只 append 一行，最安全。
+#
+# 执行时机：workflow 步骤 4 已跑过 feeds update -a / install -a，
+#   步骤 5（本脚本）只需单独 update/install 新 feed；脚本末尾会
+#   rm tmp/.packageinfo + make prepare-tmpinfo 重建索引，新包能进索引。
+#
+# 包链：luci-app-store → luci-lib-taskd → (luci-lib-xterm, taskd)
+#   LUCI_DEPENDS 还带 +curl +tar +libuci-lua +mount-utils；19.07+ 另需 luci-compat。
+# =========================================================
+if [ "$ADD_ISTORE" = "true" ]; then
+  ISTORE_FEED_LINE='src-git istore https://github.com/linkease/istore;main'
+
+  # 幂等：重复执行不追加第二行。先补一个空行，防止上游文件末尾无换行。
+  if ! grep -qE '^[[:space:]]*src-git[[:space:]]+istore([[:space:]]|$)' feeds.conf.default; then
+    echo >> feeds.conf.default
+    echo "$ISTORE_FEED_LINE" >> feeds.conf.default
+    echo "✅ iStore: 已追加 feed 到 feeds.conf.default"
+  else
+    echo "✅ iStore: feed 已存在，跳过追加"
+  fi
+
+  ./scripts/feeds update istore || {
+    echo "::error::./scripts/feeds update istore 失败（GitHub 拉取不通？）"
+    exit 1
+  }
+
+  # 官方写法；-d y = 给新装包设 Kconfig 默认值（此时 .config 尚未生成，
+  # 不会提前展开；步骤 6 会用基座 + 机型配置覆盖它，步骤 9 才 defconfig）。
+  if ! ./scripts/feeds install -d y -p istore luci-app-store; then
+    echo "::warning::官方 install 命令失败，退回不带 -d 的写法"
+    ./scripts/feeds install -p istore luci-app-store || {
+      echo "::error::./scripts/feeds install -p istore luci-app-store 失败"
+      exit 1
+    }
+  fi
+
+  # 兜底：四个包都必须在 package/feeds/istore 下，缺哪个补装哪个。
+  # install 本身会带依赖，但不同 feeds 脚本版本对 -d 的处理有差异，
+  # 这里以符号链接为准，避免 defconfig 静默剔除。
+  for p in luci-app-store luci-lib-taskd luci-lib-xterm taskd; do
+    if [ ! -e "package/feeds/istore/$p" ]; then
+      ./scripts/feeds install -p istore "$p" || {
+        echo "::error::iStore 依赖包 $p 无法安装"
+        exit 1
+      }
+    fi
+    echo "✅ iStore: package/feeds/istore/$p 已就位"
+  done
 fi
 
 # =========================================================
@@ -621,6 +684,7 @@ if [ -n "$(ls -A "$PKG_DIR" 2>/dev/null)" ]; then
   fi
   [ "$ADD_ONU" = "true" ] && REQUIRED="$REQUIRED luci-app-onu"
   [ "$ADD_RTP2HTTPD" = "true" ] && REQUIRED="$REQUIRED rtp2httpd luci-app-rtp2httpd"
+  [ "$ADD_ISTORE" = "true" ] && REQUIRED="$REQUIRED luci-app-store luci-lib-taskd luci-lib-xterm taskd"
 
   # 与 configs/an7581.config / an7583.config 里 =y 的包一一对应。
   # 任一项没进索引，defconfig 都会把那个 =y 静默剔除 —— 编出来的固件少了菜单

@@ -1,6 +1,6 @@
-PonWrt CI 补丁包 v2 —— ONU 菜单 + rtp2httpd v3.17.2
+PonWrt CI 补丁包 v3 —— ONU 菜单 + rtp2httpd 3.17.2 + iStore 软件中心
 基于 gggbin2026/Actions-OpenWrt-AN758X 的 main 分支整份替换。
-v2 = v1（naoki66 顶级 ONU 菜单）+ 官方新版 rtp2httpd，已包含 v1 全部改动。
+v3 = v2 的全部改动 + linkease/istore feed，已包含 v1/v2 所有内容。
 
 【上传位置】GitHub 仓库网页 Add file -> Upload files，同名覆盖：
 
@@ -12,43 +12,65 @@ v2 = v1（naoki66 顶级 ONU 菜单）+ 官方新版 rtp2httpd，已包含 v1 �
   .github/workflows/build-ponwrt.yml         -> .github/workflows/（覆盖）
 
   .github 是隐藏目录，解压后看不到请开启「显示隐藏项目」。
-  若已经上传过 v1：workflow 内容未变，只需重新覆盖 diy-part1.sh 和 4 份 config。
+  已传过 v2 的话：workflow 与 4 份 config 有变化，全部都要重新覆盖。
 
-【v2 新增了什么】
-旧版来自 ImmortalWrt feeds：
-  feeds/packages/net/rtp2httpd                 = 3.16.0
-  feeds/luci/applications/luci-app-rtp2httpd   = 3.16.0 的 LuCI 前端
-新版用 stackia/rtp2httpd 官方 v3.17.2，从官方 openwrt-support/ 取包。
+【★ 最容易踩的坑：不要用 FEEDS_CONF】
+workflow 第 12 行有个 FEEDS_CONF 环境变量（当前为空）。步骤 4 的逻辑是：
+  [ -n "$FEEDS_CONF" ] && cp "$GITHUB_WORKSPACE/$FEEDS_CONF" feeds.conf.default
+也就是「整份替换」，不是追加。上游 pbs05/ponwrt 的 feeds.conf.default 有 7 个
+有效 feed，其中 pon_drivers / pon_userspace 是整个 PON 功能与 v2 的 ONU 菜单
+的基础。如果你照网上 CI 模板新建一份只含 istore 的 feeds.conf.default 并填进
+FEEDS_CONF，这两行会被冲掉，PON 包全部消失，固件直接编废。
 
-diy-part1.sh：
-  · 新增 ADD_RTP2HTTPD 开关，clone 官方 v3.17.2 tag；
-  · 删掉 feed 里的旧同名包与 package/feeds 符号链接（含旧 i18n 链接），
-    避免两份同名包进索引被挑错；
-  · 把 rtp2httpd 和 luci-app-rtp2httpd 放进 package/custom，
-    并强制使用官方 Makefile.versioned（固定 3.17.2 + PKG_HASH，
-    普通 Makefile 依赖 git describe 和 ../../ 源码树，脱离原仓库编不了）；
-  · REQUIRED 校验加入 rtp2httpd / luci-app-rtp2httpd。
+所以 v3 采用官方 README 的 append 方案，放在 diy-part1.sh 里执行：
+  echo >> feeds.conf.default
+  echo 'src-git istore https://github.com/linkease/istore;main' >> feeds.conf.default
+  ./scripts/feeds update istore
+  ./scripts/feeds install -d y -p istore luci-app-store
+执行时机在 workflow 步骤 5（步骤 4 已跑完 feeds update -a / install -a），
+脚本末尾会 rm tmp/.packageinfo + make prepare-tmpinfo 重建索引，新包能进索引。
 
-config：新增 CONFIG_PACKAGE_rtp2httpd=y 与
-  CONFIG_PACKAGE_luci-i18n-rtp2httpd-zh-cn=y，原 luci-app-rtp2httpd=y 保留。
+【v3 改了什么】
+1) diy-part1.sh
+   · 新增 ADD_ISTORE 开关；幂等 append 一行 feed（不重复追加）；
+   · 单独 update istore，再按官方命令 install（失败自动退回不带 -d 的写法）；
+   · 兜底确认 4 个包都生成了 package/feeds/istore/<pkg> 符号链接；
+   · REQUIRED 校验加入 luci-app-store / luci-lib-taskd / luci-lib-xterm / taskd，
+     任一包没进索引会在第 5 步直接报错，不会编出「看似成功但没商店」的固件。
 
-workflow：与 v1 相同，仅把写死的 luci-app-pon 校验改成兼容
-  luci-app-onu / luci-app-pon 两种写法。
+2) 4 份 config 末尾新增「21. iStore 软件中心」段：
+   CONFIG_PACKAGE_luci-app-store=y / luci-lib-taskd=y / luci-lib-xterm=y /
+   taskd=y / luci-compat=y / curl=y
+   依赖链：luci-app-store -> luci-lib-taskd -> (luci-lib-xterm, taskd)，
+   LUCI_DEPENDS 另带 +curl +tar +libuci-lua +mount-utils，这些由 defconfig
+   按 DEPENDS 自动拉入，不必手写。
+   * luci-compat：19.07+ 的 iStore 是 Lua LuCI 应用，必须有兼容层。
+     两个目标机型原配置已有 =y；an7581 / an7583 这次补上。
+   * 界面中文由 istore-ui 前端自带，没有 luci-i18n-store-zh-cn 这个包，别乱加。
 
-【编译】Actions -> Build PonWrt -> soc=an7581
-  profile = fiberhome_hg5585f-ct  或  nokia_xg-040g-md-ubi
-  首次建议先跑 Warm Build Cache（免费 runner 350 分钟上限）。
+3) build-ponwrt.yml：步骤 9 的 defconfig 后校验新增 luci-app-store 检查，
+   并打印 feeds.conf / package/feeds/istore / .packageinfo 三项诊断。
+   理由：defconfig 会把树里不存在的包符号静默删掉，不加校验会白刷一次。
 
-【不想重编译的快捷办法】在已刷好的设备上 SSH 执行官方一键脚本，
-它支持 apk / opkg，会自动卸载 3.16.0 并安装 3.17.2 三个包：
-  curl -fsSL https://raw.githubusercontent.com/stackia/rtp2httpd/main/scripts/install-openwrt.sh | sh
-脚本会提示选择 GitHub 直连 / gh-proxy / ghfast 镜像；装完 Ctrl+F5 清浏览器缓存。
-注意：这是写进 overlay，下次重刷固件会回到 3.16.0；要固化就走上面的编译方案。
+【编译】Actions -> Build PonWrt -> soc=an7581，其余保持默认，跑两次：
+  profile = fiberhome_hg5585f-ct
+  profile = nokia_xg-040g-md-ubi
+首次建议先跑 Warm Build Cache（免费 runner 350 分钟上限）。
+
+【日志里盯这几行】
+  ✅ iStore: 已追加 feed 到 feeds.conf.default
+  ✅ iStore: package/feeds/istore/luci-app-store 已就位  （共 4 行）
+  ✅ PON 关键包校验通过
+  ✅ 状态插件校验通过
+若出现 ::error::以下必装插件未进入 tmp/.packageinfo 或
+  ::error::以下关键包在 defconfig 后未启用，把第 4/5/9 步日志贴出来。
 
 【注意】
-· 新版 LuCI 是 JS-based，需要较新 LuCI（PonWrt / ImmortalWrt master 满足）。
-· 新版配置分 /etc/config/rtp2httpd 与 /etc/rtp2httpd.conf 两个文件；
-  ONU 的 IPTV 页也会写 rtp2httpd 相关字段，建议只在一处配置，避免互相覆盖。
+· AN7581 是 arm64，属于 iStore 官方支持的两种架构之一。
+· iStore 商店里下载安装的第三方插件，其依赖需自行解决；官方 README 明确说
+  「即使系统能装 iStore，里面的插件不一定能装」，精简固件尤其如此。
 · 刷机前备份 factory（烽火）/ bosa、ri（诺基亚）原厂校准与身份数据；
   A 机型固件绝不能刷到 B 机型。
-· 回退：ADD_RTP2HTTPD=false 且把 4 份 config 一起还原，否则 defconfig 校验会失败。
+· 回退：把 diy-part1.sh 的 ADD_ISTORE 改成 false，同时把 4 份 config 的
+  「21. iStore 软件中心」段和 workflow 的 iStore 校验一起删掉，
+  只改一处会让 defconfig 校验失败。
