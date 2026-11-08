@@ -899,6 +899,50 @@ jobs:
           bash "$S" "$PWD"
 
           # =========================================================
+          # iStore v3.4：defconfig 之后把包符号写回 .config
+          # ---------------------------------------------------------
+          # 现象（v3.3 日志已坐实）：
+          #   · tmp/.config-package.in 里确实有
+          #       config PACKAGE_luci-app-store        （第 8/9 条 = 1）
+          #   · 所有 Lua / curl / taskd 依赖都是 =y
+          #   · defconfig 无 WARNING
+          #   · 但 .config 里连 "# ... is not set" 都没有，完全空白
+          #
+          # 这不是符号缺失，而是 Kconfig 把该符号判为「不可见」：
+          # package-metadata.pl 的 mconf_depends 会把被 +select 的包的
+          # depends 重新发射成 `depends on ...`（含 !PACKAGE_xxx 形式的
+          # 虚拟包排名条件）。任一条件求值为 n 时，conf --defconfig
+          # 对不可见符号既不写 =y、也不写 "is not set"，直接跳过，
+          # 且不打印 WARNING —— 正好对应上面的现象。
+          #
+          # 关键事实：Kconfig 只在 menuconfig/defconfig 阶段起作用。
+          # 真正决定「编哪些包」的是编译阶段读的 .config 本身
+          # （include/package-pack.mk 的 CONFIG_PACKAGE_* +
+          #  tmp/.packagedeps 的 DEPENDS 排序）。依赖包已全部 =y。
+          # 所以这里直接把符号写回，buildroot 就会编译并装进固件。
+          #
+          # 本流水线步骤 9 之后不再跑 make defconfig（注释里写明
+          # 「唯一一次 defconfig」），写回的值不会被再次抹掉；
+          # toplevel.mk 的 config 一致性检查只写 tmp/.config，不改 .config。
+          # =========================================================
+          ISTORE_SYMS="luci-app-store luci-lib-taskd luci-lib-xterm taskd"
+          ISTORE_WROTE=""
+          for s in $ISTORE_SYMS; do
+            if ! grep -q "^CONFIG_PACKAGE_${s}=y" .config; then
+              sed -i "/^# CONFIG_PACKAGE_${s} is not set$/d; /^CONFIG_PACKAGE_${s}=m$/d" .config
+              printf 'CONFIG_PACKAGE_%s=y\n' "$s" >> .config
+              ISTORE_WROTE="$ISTORE_WROTE $s"
+            fi
+          done
+          if [ -n "$ISTORE_WROTE" ]; then
+            echo "✅ defconfig 后已写回:$ISTORE_WROTE（绕过 Kconfig depends 求值）"
+            echo "  --- Kconfig 里 luci-app-store 的完整 config 块（含 depends/select）---"
+            grep -n -A22 'config PACKAGE_luci-app-store' tmp/.config-package.in 2>/dev/null | head -24 || echo "    (无)"
+          else
+            echo "✅ iStore 四个包符号均在 .config 中为 =y"
+          fi
+
+          # =========================================================
           # 关键包校验：defconfig 会把 feeds 里不存在的包静默剔除，
           # 这里显式确认 PON 核心链路还在，否则编出来光口不通
           # =========================================================
@@ -917,8 +961,8 @@ jobs:
           if ! grep -q "^CONFIG_PACKAGE_luci-app-store=y" .config; then
             MISSING="$MISSING luci-app-store(iStore)"
             echo "  --- iStore 诊断 ---"
-            echo "  1) feeds.conf 中 istore 行: $(grep -c '^src-git istore ' feeds.conf.default 2>/dev/null || echo 0)"
-            echo "  2) package/feeds/istore: $([ -d package/feeds/istore ] && echo 存在 || echo 不存在)"
+            echo "  1) package/custom/luci-app-store/Makefile: $([ -f package/custom/luci-app-store/Makefile ] && echo 存在 || echo 不存在)"
+            echo "  2) package/custom 下 iStore 包数: $(ls -d package/custom/luci-app-store package/custom/luci-lib-taskd package/custom/luci-lib-xterm package/custom/taskd 2>/dev/null | wc -l)"
             echo "  3) .packageinfo 记录: $(grep -c '^Package: luci-app-store$' tmp/.packageinfo 2>/dev/null || echo 0)"
             echo "  4) 机型配置里是否有 iStore 段: $(grep -c 'CONFIG_PACKAGE_luci-app-store' "$GITHUB_WORKSPACE/${CONFIG_FILE}" 2>/dev/null || echo 0)"
             echo "  5) .config 中 luci-app-store 实际状态: $(grep 'luci-app-store' .config 2>/dev/null | tail -3 || echo '(完全没有这一行)')"
@@ -933,7 +977,7 @@ jobs:
             grep -n 'luci-app-store' tmp/.config-package.in 2>/dev/null | head -5 || echo "     (无)"
           fi
           if [ -n "$MISSING" ]; then
-            echo "::error::以下关键包在 defconfig 后未启用，检查 feeds 是否完整:$MISSING"
+            echo "::error::以下关键包在最终 .config 中未启用:$MISSING"
             exit 1
           fi
           echo "✅ PON 关键包校验通过"
