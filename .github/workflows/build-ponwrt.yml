@@ -863,29 +863,35 @@ jobs:
           #   成功 → 只打尾部 5 行，另把 WARNING 汇总出来
           #   （WARNING 正是「包被静默剔除」的第一现场）。
           # =========================================================
-          # iStore 修复：强制重建 Kconfig 符号表
+          # iStore：重建 Kconfig 符号表 + 检查（只告警，不阻断）
           # ---------------------------------------------------------
-          # toplevel.mk 的 prepare-tmpinfo 用的是
+          # 为什么重建：toplevel.mk 的 prepare-tmpinfo 用
           #   [ tmp/.config-package.in -nt tmp/.packageinfo ] || regenerate
-          # 也就是「符号表比索引新就不重新生成」。若符号表是旧缓存，
-          # 就算 .packageinfo 里已经有 iStore 包，也不会生成
-          # `config PACKAGE_luci-app-store`，defconfig 随即把 .config 里
-          # 手写的 =y 当未知符号静默丢弃（且不报 WARNING）。
-          # 这里先删符号表再 prepare-tmpinfo，然后做一次硬预检：
-          # 符号不在表里就在第 9 步开头失败，不用等几个小时后白编。
+          # 即「符号表比索引新就不重新生成」，旧缓存会让新包符号不出现。
+          #
+          # ⚠ v3.2 这里误报过一次，原因是 grep 写错了：
+          #   scripts/package-metadata.pl 第 364-366 行生成的是
+          #     print "\t"; ... print "config PACKAGE_".$pkg->{name}."\n";
+          #   真实行是 "\tconfig PACKAGE_luci-app-store"（带 tab 缩进）。
+          #   v3.2 用 grep '^config PACKAGE_...' 行首锚定，匹配不到缩进行，
+          #   于是把本来正常的构建拦下了。luci.mk 的 LUCI_CATEGORY?=LuCI
+          #   非空，包必然进 category，符号必然存在。
+          #   现在改成允许前导空白 + 允许 menuconfig；并降级为 warning，
+          #   最终判据交给下面 defconfig 之后对 .config 的准确校验。
           # =========================================================
           rm -f tmp/.config-package.in tmp/.config-target.in \
                 tmp/.config-feeds.in tmp/.config-check
           make -s prepare-tmpinfo OPENWRT_BUILD= >/dev/null 2>&1 || true
-          if ! grep -q '^config PACKAGE_luci-app-store$' tmp/.config-package.in 2>/dev/null; then
-            echo "::error::tmp/.config-package.in 里没有 config PACKAGE_luci-app-store"
-            echo "  package/custom/luci-app-store: $([ -f package/custom/luci-app-store/Makefile ] && echo 存在 || echo 不存在)"
-            echo "  .packageinfo 记录: $(grep -c '^Package: luci-app-store$' tmp/.packageinfo 2>/dev/null || echo 0)"
-            echo "  符号表里含 store 的 config 行:"
-            grep -i '^config PACKAGE_.*store' tmp/.config-package.in 2>/dev/null | head -5 || echo "    (无)"
-            exit 1
+          if grep -Eq '^[[:space:]]*(menu)?config[[:space:]]+PACKAGE_luci-app-store([[:space:]]|$)' tmp/.config-package.in 2>/dev/null; then
+            echo "✅ Kconfig 符号表已包含 PACKAGE_luci-app-store"
+          else
+            echo "::warning::Kconfig 符号表里未找到 PACKAGE_luci-app-store（不阻断，由 defconfig 后的 .config 校验裁决）"
+            echo "  --- 符号表里含 luci-app-store 的原始行（不加锚定）---"
+            grep -n 'luci-app-store' tmp/.config-package.in 2>/dev/null | head -8 || echo "    (无)"
+            echo "  --- .packageinfo 里的包记录 ---"
+            grep -A12 '^Package: luci-app-store$' tmp/.packageinfo 2>/dev/null | head -14 || echo "    (无)"
+            echo "  package/custom/luci-app-store/Makefile: $([ -f package/custom/luci-app-store/Makefile ] && echo 存在 || echo 不存在)"
           fi
-          echo "✅ Kconfig 符号表已包含 PACKAGE_luci-app-store"
 
           S="$GITHUB_WORKSPACE/scripts/defconfig.sh"
           [ -f "$S" ] || { echo "::error::缺 $S"; exit 1; }
@@ -922,7 +928,9 @@ jobs:
             done
             echo "  7) defconfig 日志里与 iStore/Lua 相关的 WARNING（包被剔除的第一现场）:"
             grep -iE '^WARNING:.*(store|taskd|lua|curl|coreutils|script-utils)' /tmp/defconfig.log 2>/dev/null | head -12 || echo "     (无)"
-            echo "  8) Kconfig 符号表里是否有 config PACKAGE_luci-app-store: $(grep -c '^config PACKAGE_luci-app-store$' tmp/.config-package.in 2>/dev/null || echo 0)"
+            echo "  8) Kconfig 符号表里是否有 PACKAGE_luci-app-store: $(grep -Ec '^[[:space:]]*(menu)?config[[:space:]]+PACKAGE_luci-app-store([[:space:]]|$)' tmp/.config-package.in 2>/dev/null || echo 0)"
+            echo "  9) 符号表里含 luci-app-store 的原始行:"
+            grep -n 'luci-app-store' tmp/.config-package.in 2>/dev/null | head -5 || echo "     (无)"
           fi
           if [ -n "$MISSING" ]; then
             echo "::error::以下关键包在 defconfig 后未启用，检查 feeds 是否完整:$MISSING"
