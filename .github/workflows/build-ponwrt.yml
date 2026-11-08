@@ -862,6 +862,31 @@ jobs:
           #   scripts/defconfig.sh 负责：失败 → 打真日志 + exit 1；
           #   成功 → 只打尾部 5 行，另把 WARNING 汇总出来
           #   （WARNING 正是「包被静默剔除」的第一现场）。
+          # =========================================================
+          # iStore 修复：强制重建 Kconfig 符号表
+          # ---------------------------------------------------------
+          # toplevel.mk 的 prepare-tmpinfo 用的是
+          #   [ tmp/.config-package.in -nt tmp/.packageinfo ] || regenerate
+          # 也就是「符号表比索引新就不重新生成」。若符号表是旧缓存，
+          # 就算 .packageinfo 里已经有 iStore 包，也不会生成
+          # `config PACKAGE_luci-app-store`，defconfig 随即把 .config 里
+          # 手写的 =y 当未知符号静默丢弃（且不报 WARNING）。
+          # 这里先删符号表再 prepare-tmpinfo，然后做一次硬预检：
+          # 符号不在表里就在第 9 步开头失败，不用等几个小时后白编。
+          # =========================================================
+          rm -f tmp/.config-package.in tmp/.config-target.in \
+                tmp/.config-feeds.in tmp/.config-check
+          make -s prepare-tmpinfo OPENWRT_BUILD= >/dev/null 2>&1 || true
+          if ! grep -q '^config PACKAGE_luci-app-store$' tmp/.config-package.in 2>/dev/null; then
+            echo "::error::tmp/.config-package.in 里没有 config PACKAGE_luci-app-store"
+            echo "  package/custom/luci-app-store: $([ -f package/custom/luci-app-store/Makefile ] && echo 存在 || echo 不存在)"
+            echo "  .packageinfo 记录: $(grep -c '^Package: luci-app-store$' tmp/.packageinfo 2>/dev/null || echo 0)"
+            echo "  符号表里含 store 的 config 行:"
+            grep -i '^config PACKAGE_.*store' tmp/.config-package.in 2>/dev/null | head -5 || echo "    (无)"
+            exit 1
+          fi
+          echo "✅ Kconfig 符号表已包含 PACKAGE_luci-app-store"
+
           S="$GITHUB_WORKSPACE/scripts/defconfig.sh"
           [ -f "$S" ] || { echo "::error::缺 $S"; exit 1; }
           dos2unix "$S" 2>/dev/null || true
@@ -897,6 +922,7 @@ jobs:
             done
             echo "  7) defconfig 日志里与 iStore/Lua 相关的 WARNING（包被剔除的第一现场）:"
             grep -iE '^WARNING:.*(store|taskd|lua|curl|coreutils|script-utils)' /tmp/defconfig.log 2>/dev/null | head -12 || echo "     (无)"
+            echo "  8) Kconfig 符号表里是否有 config PACKAGE_luci-app-store: $(grep -c '^config PACKAGE_luci-app-store$' tmp/.config-package.in 2>/dev/null || echo 0)"
           fi
           if [ -n "$MISSING" ]; then
             echo "::error::以下关键包在 defconfig 后未启用，检查 feeds 是否完整:$MISSING"
