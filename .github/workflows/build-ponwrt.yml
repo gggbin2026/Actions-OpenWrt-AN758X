@@ -755,13 +755,21 @@ jobs:
           #   make defconfig 就会把 CONFIG_PACKAGE_luci-app-store=y 静默剔除。
           #   另外，若上传补丁时 configs/ 里 4 个文件没覆盖成功（还是 v2），
           #   .config 里根本不会有这些行 —— 这是本次失败的头号嫌疑。
+          #   还有一条来自 tar 的隐藏链：机型配置里 CONFIG_PACKAGE_TAR_XZ=y，
+          #   utils/tar/Makefile 是 +PACKAGE_TAR_XZ:xz；而 xz applet 包
+          #   DEPENDS:=xz-utils +liblzma。三个都没写 =y 时，Kconfig 把
+          #   PACKAGE_tar 判为不可见并抹掉，编译阶段 staging_dir 的
+          #   packages.adb 里就没有 tar，apk 装 luci-app-store 时会报
+          #     ERROR: unable to select packages: tar (no such package)
+          #   所以这里把 xz / xz-utils / liblzma 一并注入。
           # 用 printf 而不是 heredoc：块标量带缩进会把空格写进 .config，
           # Kconfig 只认行首的 CONFIG_ 符号。
           # =========================================================
           for sym in luci-app-store luci-lib-taskd luci-lib-xterm taskd \
                      luci-compat luci-lua-runtime liblua libuci-lua \
                      curl tar coreutils coreutils-stty script-utils mount-utils \
-                     procd libuci uci; do
+                     procd libuci uci \
+                     xz xz-utils liblzma; do
             printf 'CONFIG_PACKAGE_%s=y\n' "$sym" >> .config
           done
           echo "✅ 已无条件注入 iStore / Lua 依赖链（覆盖基座的 is not set）"
@@ -899,7 +907,7 @@ jobs:
           bash "$S" "$PWD"
 
           # =========================================================
-          # iStore v3.4：defconfig 之后把包符号写回 .config
+          # iStore v3.5：defconfig 之后把「整条运行时依赖链」写回 .config
           # ---------------------------------------------------------
           # 现象（v3.3 日志已坐实）：
           #   · tmp/.config-package.in 里确实有
@@ -921,11 +929,27 @@ jobs:
           #  tmp/.packagedeps 的 DEPENDS 排序）。依赖包已全部 =y。
           # 所以这里直接把符号写回，buildroot 就会编译并装进固件。
           #
+          # v3.5 补充：v3.4 只写回了主包，结果走到 package/install 时
+          #   apk add ... $(cat tmp/apk_install_list)
+          # 报 "tar (no such package): required by: luci-app-store"。
+          # 原因正是上面那个 Kconfig 不可见机制同时抹掉了 CONFIG_PACKAGE_tar
+          #（config 块里 depends on !(PACKAGE_TAR_XZ) || PACKAGE_xz-utils，
+          #  而 xz-utils/xz/liblzma 都没选）→ tar 没编译 → packages.adb 里没有。
+          # 所以写回清单必须覆盖全部依赖，不能只写主包。
+          #
           # 本流水线步骤 9 之后不再跑 make defconfig（注释里写明
           # 「唯一一次 defconfig」），写回的值不会被再次抹掉；
           # toplevel.mk 的 config 一致性检查只写 tmp/.config，不改 .config。
           # =========================================================
-          ISTORE_SYMS="luci-app-store luci-lib-taskd luci-lib-xterm taskd"
+          # v3.5：不能只写回主包。luci-app-store 被强行装进 rootfs 后，
+          # apk 会按它 APK 元数据里的 depends 去找 tar/curl/... ；
+          # 任何一个包没在 .config 里 =y 就不会被编译进 packages.adb，
+          # 于是报 "xxx (no such package): required by: luci-app-store"。
+          # 把整条链全部写回，一次补齐。
+          ISTORE_SYMS="luci-app-store luci-lib-taskd luci-lib-xterm taskd \
+                       tar curl libuci-lua luci-lua-runtime mount-utils \
+                       coreutils coreutils-stty script-utils procd \
+                       xz xz-utils liblzma liblua libuci uci"
           ISTORE_WROTE=""
           for s in $ISTORE_SYMS; do
             if ! grep -q "^CONFIG_PACKAGE_${s}=y" .config; then
@@ -935,7 +959,7 @@ jobs:
             fi
           done
           if [ -n "$ISTORE_WROTE" ]; then
-            echo "✅ defconfig 后已写回:$ISTORE_WROTE（绕过 Kconfig depends 求值）"
+            echo "✅ defconfig 后已写回:$ISTORE_WROTE（含 tar/xz 整条链）"
             echo "  --- Kconfig 里 luci-app-store 的完整 config 块（含 depends/select）---"
             grep -n -A22 'config PACKAGE_luci-app-store' tmp/.config-package.in 2>/dev/null | head -24 || echo "    (无)"
           else
