@@ -859,6 +859,14 @@ jobs:
              ! grep -q "^CONFIG_PACKAGE_luci-app-pon=y" .config; then
             MISSING="$MISSING ONU-LuCI(luci-app-onu/luci-app-pon)"
           fi
+          # iStore：feed 未注入时 defconfig 会静默剔除 =y，必须显式确认
+          if ! grep -q "^CONFIG_PACKAGE_luci-app-store=y" .config; then
+            MISSING="$MISSING luci-app-store(iStore)"
+            echo "  --- iStore 诊断 ---"
+            echo "  1) feeds.conf 中 istore 行: $(grep -c '^src-git istore ' feeds.conf.default 2>/dev/null || echo 0)"
+            echo "  2) package/feeds/istore: $([ -d package/feeds/istore ] && echo 存在 || echo 不存在)"
+            echo "  3) .packageinfo 记录: $(grep -c '^Package: luci-app-store$' tmp/.packageinfo 2>/dev/null || echo 0)"
+          fi
           if [ -n "$MISSING" ]; then
             echo "::error::以下关键包在 defconfig 后未启用，检查 feeds 是否完整:$MISSING"
             exit 1
