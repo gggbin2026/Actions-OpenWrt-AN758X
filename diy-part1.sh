@@ -1,4 +1,4 @@
-#!/bin/bash
+﻿#!/bin/bash
 # ================================================================
 # diy-part1.sh —— 只做一件事：拉取可选插件到 package/custom
 # 运行目录: ponwrt 源码根目录（feeds 安装之后、加载 .config 之前）
@@ -233,7 +233,7 @@ fi
 #   LUCI_DEPENDS 还带 +curl +tar +libuci-lua +mount-utils；19.07+ 另需 luci-compat。
 # =========================================================
 if [ "$ADD_ISTORE" = "true" ]; then
-  ISTORE_FEED_LINE='src-git istore https://github.com/linkease/istore;main'
+  ISTORE_FEED_LINE='src-git istore https://github.com/istoreos/istore;main'
 
   # 幂等：重复执行不追加第二行。先补一个空行，防止上游文件末尾无换行。
   if ! grep -qE '^[[:space:]]*src-git[[:space:]]+istore([[:space:]]|$)' feeds.conf.default; then
