@@ -59,7 +59,8 @@ checks = [
      '工厂信息/恢复/终端列表/网络模式'),
     ('USB 打印服务', 'p910nd' in sel and 'luci-app-usb-printer' in sel,
      'p910nd + LuCI 界面 + 中文 + 全套 USB 内核模块'),
-    ('iStore 软件中心', 'luci-app-store' in sel, 'luci-app-store + taskd + luci-lib-*'),
+    ('iStore 软件中心', 'luci-app-store' in sel,
+     '本版已移除；用 FastNet + `luci-app-package-manager`（apk 界面）替代'),
     ('nftables 防火墙', 'firewall4' in sel, 'fw4 + kmod-nft-*，不引入 iptables'),
     ('内核 6.18', on('CONFIG_LINUX_6_18'), 'KERNEL_PATCHVER 6.18'),
     ('apk + 全量签名', on('CONFIG_USE_APK') and on('CONFIG_SIGNED_PACKAGES'),
@@ -94,8 +95,8 @@ groups = [
         'luci-app-package-manager', 'luci-app-firewall', 'luci-app-poweroffdevice',
         'luci-app-owq-wol', 'luci-app-accesscontrol']),
     ('USB 打印', ['luci-app-usb-printer', 'luci-app-p910nd']),
-    ('应用商店 / 主题', [
-        'luci-app-store', 'luci-theme-argon', 'luci-theme-bootstrap',
+    ('主题 / 包管理', [
+        'luci-app-package-manager', 'luci-theme-argon', 'luci-theme-bootstrap',
         'luci-theme-fluent', 'luci-theme-kucat']),
 ]
 out.write('## 六、内置插件清单\n\n')

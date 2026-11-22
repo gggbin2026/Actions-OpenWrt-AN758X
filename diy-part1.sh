@@ -85,8 +85,16 @@ ADD_LUCI_APP=true       # qwe-qaq/luci-app 仓库（monorepo）
                         #   ├─ luci-app-natmode     NAT 类型三选一（网络 → NAT 类型）
                         #   └─ luci-app-pon-status  PON 光模块卡片（概览页「系统」下一格）
 ADD_ONU=true            # ★ naoki66/OpenWrt_ONU_CONFIG：顶级 ONU 菜单（替代旧 luci-app-pon）
-APPLY_ONU_FW4_PATCH=true # 可选：firewall4 flowtable 补丁（失败仅警告，不阻断编译）
-ADD_ISTORE=true         # ★ istoreos/istore：iStore 软件中心（package/custom 方式）
+# 2026-11-22：旧版在这里用 git apply 找源码树里的 fw4.uc，但 firewall4 是
+# PKG_SOURCE_PROTO=git 的外部源码包，fw4.uc 只在 build_dir 解压后才有 ——
+# 所以这行永远是「未找到 firewall4/fw4.uc ... 跳过」的假 warning。
+# 补丁改由 workflow 的 "Apply optional ONU flowtable patch" 步骤在 make download
+# 之后 prepare 出源码再 dry-run 应用（见 build-ponwrt.yml）。这里保持 false。
+APPLY_ONU_FW4_PATCH=false
+ADD_ISTORE=false        # ★ 已移除 iStore（2026-11-22）：已用 FastNet 替代，
+                        #   且它拖进来的 GNU tar / Lua / 压缩库依赖链导致 run #23
+                        #   的 tar-1.35-r2.apk 编译失败。关掉后整段 clone 与
+                        #   REQUIRED 校验都不会执行（两处都是条件式）。
 # 下面这几个开关都能被环境变量覆盖（: ${VAR:=默认} 的写法）：
 # workflow 里选了「不拉私有仓库」时会注入 ADD_FTTR=false，整段直接跳过。
 : "${ADD_FTTR:=true}"       # FTTR 全家桶总开关（下面的子开关都受它管）★仅 HM2004-DU
@@ -890,6 +898,11 @@ if [ -n "$(ls -A "$PKG_DIR" 2>/dev/null)" ]; then
       open-app-filter) echo "appfilter" ;;
       oaf)             echo "kmod-oaf" ;;
       h3c-fmcs)        echo "kmod-h3c-fmcs" ;;
+      # naoki66/OpenWrt_ONU_CONFIG 的目录叫 airoha-pon-daemons，
+      # 但 Makefile 里 PKG_NAME 同名、define Package/airoha-pond —— 索引里是
+      # airoha-pond。run #23 日志里「❌ airoha-pon-daemons 查不到」是误报，
+      # 实际 airoha-pond=y 已编入、PON 关键包校验也通过了。
+      airoha-pon-daemons) echo "airoha-pond" ;;
       *)               echo "$1" ;;
     esac
   }

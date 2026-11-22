@@ -14,8 +14,8 @@
 #   做三件事：
 #     1) 完整输出落盘；失败打印尾部 N 行 + ::error:: 并 exit 1
 #     2) 成功时只打尾部 5 行（保持日志干净，与原行为一致）
-#     3) 把输出里的 `WARNING:` 汇总 —— 那是「包被静默剔除」的直接证据。
-#        OpenWrt 树本身就有一些无害的 warning，所以只汇总、不失败。
+#     3) 把输出里的 `WARNING:` 汇总，并区分「涉及 .config 里 =y 包的真缺失」
+#        与「未选中包的 feeds 元数据提示」（后者无害，只作说明、不发 ::warning::）。
 #
 #   用法:
 #     bash scripts/defconfig.sh [openwrt_dir]
@@ -61,6 +61,7 @@ fi
 tail -n "$TAIL_N" "$LOG"
 
 # ---------------------------------------------------------------
+# ---------------------------------------------------------------
 # warning 汇总
 #
 #   defconfig 里值得看的只有两类，都是「这个包会被静默剔除」：
@@ -70,29 +71,56 @@ tail -n "$TAIL_N" "$LOG"
 #   不能让它 fail —— 上游树本来就带一批无害的（可选包缺 optional 依赖）。
 #   但完全不报也不行：这东西正是「config 里写了 =y、编完发现没这个菜单」
 #   的第一现场。
+#
+#   2026-11-22 精准化（通读 run #23 完整日志后）：
+#     原来一律报 "::warning::有 N 条 WARNING，依赖缺失的包会被静默剔除"，
+#     而实际 10 条全是 qt6quick / qt6svg 依赖 qt6base-* 之类 —— 那些包根本
+#     没被选中，Makefile 只是进了 feeds 索引扫描，对产物零影响。
+#     真需要警觉的只有一种：缺失的依赖包名恰好是 .config 里 =y 的包。
+#     按此分流：真问题仍发 ::warning::，其余只作普通说明。
 # ---------------------------------------------------------------
 WARN_TOTAL="$(grep -c '^WARNING:' "$LOG" 2>/dev/null || true)"
 WARN_TOTAL="${WARN_TOTAL:-0}"
 
 if [ "$WARN_TOTAL" -gt 0 ]; then
-	echo "------------------------------------------"
-	echo "defconfig 报告了 $WARN_TOTAL 条 WARNING（相关包可能已被剔除）"
+  echo "------------------------------------------"
+  echo "defconfig 报告了 $WARN_TOTAL 条 WARNING"
 
-	# 上面 tail 已经打过的行不再重复；只在末尾 N 行之外的补齐
-	# （GNU head -n -N = 去掉最后 N 行）
-	REST="$(head -n "-$TAIL_N" "$LOG" 2>/dev/null | grep '^WARNING:' | head -n "$WARN_MAX" || true)"
-	if [ -n "$REST" ]; then
-		printf '%s\n' "$REST" | sed 's/^/  /'
-		SHOWN=$(printf '%s\n' "$REST" | wc -l)
-		[ "$WARN_TOTAL" -gt "$SHOWN" ] && \
-			echo "  …另有 $((WARN_TOTAL - SHOWN)) 条（其中一部分可能已在上方末尾输出里）"
-	else
-		echo "  全部落在上方末尾 $TAIL_N 行内，向上翻即可"
-	fi
-	echo "------------------------------------------"
-	echo "::warning::defconfig 有 $WARN_TOTAL 条 WARNING，依赖缺失的包会被静默剔除"
+  # 上面 tail 已经打过的行不再重复；只在末尾 N 行之外的补齐
+  # （GNU head -n -N = 去掉最后 N 行）
+  REST="$(head -n "-$TAIL_N" "$LOG" 2>/dev/null | grep '^WARNING:' | head -n "$WARN_MAX" || true)"
+  if [ -n "$REST" ]; then
+    printf '%s\n' "$REST" | sed 's/^/  /'
+    SHOWN=$(printf '%s\n' "$REST" | wc -l)
+    [ "$WARN_TOTAL" -gt "$SHOWN" ] && \
+      echo "  …另有 $((WARN_TOTAL - SHOWN)) 条（其中一部分可能已在上方末尾输出里）"
+  else
+    echo "  全部落在上方末尾 $TAIL_N 行内，向上翻即可"
+  fi
+
+  REAL=0
+  REAL_LIST=""
+  while IFS= read -r _wline; do
+    [ -n "$_wline" ] || continue
+    _dep="$(printf '%s' "$_wline" | sed -E "s/.*dependency on '([^']+)', which does not exist.*/\1/")"
+    [ -n "$_dep" ] || continue
+    [ "$_dep" = "$_wline" ] && continue          # 没匹配上，跳过
+    if [ -f .config ] && grep -qx "CONFIG_PACKAGE_${_dep}=y" .config; then
+      REAL=$((REAL + 1))
+      REAL_LIST="$REAL_LIST $_dep"
+    fi
+  done < <(grep '^WARNING:' "$LOG" 2>/dev/null || true)
+
+  echo "------------------------------------------"
+  if [ "$REAL" -gt 0 ]; then
+    echo "::warning::defconfig 有 $REAL 条 WARNING 涉及 .config 里 =y 的包，这些包可能被静默剔除:$REAL_LIST"
+  else
+    echo "ℹ $WARN_TOTAL 条 WARNING 均为「未选中包的 feeds 元数据提示」"
+    echo "  （例：qt6quick 依赖 qt6base-*、busybox 依赖 libpam —— 这些包没进 .config，不影响本固件）"
+    echo "✅ 本次 defconfig 无涉及已选包的依赖缺失"
+  fi
 else
-	echo "✅ defconfig 无 WARNING"
+  echo "✅ defconfig 无 WARNING"
 fi
 
 echo "✅ make defconfig 完成"
