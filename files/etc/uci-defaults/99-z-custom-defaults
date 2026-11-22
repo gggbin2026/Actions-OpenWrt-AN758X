@@ -1,0 +1,115 @@
+#!/bin/sh
+# ================================================================
+# 99-z-custom-defaults —— 出厂默认值（首次开机由 uci-defaults 执行）
+# 仓库：gggbin2026/Actions-OpenWrt-AN758X
+#
+# 2026-11-22 补回：同步上游时这个文件连同 99-zz-homebox、
+# files/etc/config/homebox、files/etc/init.d/homebox 一起丢了，
+# 而文档里一直写着「root/admin / DNS 加速 / 内网 NTP」，属于文档与固件不一致。
+#
+# 本文件负责：
+#   1) root 密码 = admin          2) LAN IP = 192.168.1.1
+#   3) 时区 Asia/Shanghai(CST-8)  4) DNS 缓存 + 三个国内上游
+#   5) 内网 NTP server + DHCP option 42 + 防火墙放行 UDP 123
+#   6) 运行期关 IPv6（编译期符号已在 configs/*.config 里关掉）
+#
+# ⚠ 只在首次开机生效。sysupgrade 若勾「保留配置」，旧 /etc/shadow、
+#   /etc/config/* 会盖回来 —— 跨版本升级务必不要保留配置。
+# ================================================================
+
+log() { logger -t custom-defaults "$@"; }
+
+# ---------------------------------------------------------------
+# 1. root 密码固定为 admin
+#    用固定 md5crypt hash 直接改 /etc/shadow，避开 busybox passwd
+#    在非 tty 环境下拒绝从管道读两次密码的问题。
+# ---------------------------------------------------------------
+ROOT_HASH='$1$AN758x$xsMirP8vbGcPsTLgPNLjS1'
+if [ -f /etc/shadow ]; then
+  # sed 替换串里的 $ 是字面量（sed 只在正则部分把 $ 当行尾），
+  # crypt base64 字符集不含 & 与 |，用 | 作分隔符避开 / 。
+  sed -i "s|^root:[^:]*:|root:${ROOT_HASH}:|" /etc/shadow
+  chmod 600 /etc/shadow
+  log "root 密码已设为 admin"
+else
+  log "警告：/etc/shadow 不存在，root 密码未设置"
+fi
+
+# ---------------------------------------------------------------
+# 2. LAN 管理地址 / 时区
+# ---------------------------------------------------------------
+uci -q set network.lan.ipaddr='192.168.1.1'
+uci -q set network.lan.netmask='255.255.255.0'
+uci -q commit network
+
+uci -q set system.@system[0].zonename='Asia/Shanghai'
+uci -q set system.@system[0].timezone='CST-8'
+
+# ---------------------------------------------------------------
+# 3. DNS 加速：缓存 10000 / 关重绑定 / 三个国内上游 / noresolv
+# ---------------------------------------------------------------
+if uci -q get dhcp.@dnsmasq[0] >/dev/null 2>&1; then
+  uci -q delete dhcp.@dnsmasq[0].server 2>/dev/null
+  uci -q add_list dhcp.@dnsmasq[0].server='223.5.5.5'
+  uci -q add_list dhcp.@dnsmasq[0].server='119.29.29.29'
+  uci -q add_list dhcp.@dnsmasq[0].server='114.114.114.114'
+  uci -q set dhcp.@dnsmasq[0].noresolv='1'
+  uci -q set dhcp.@dnsmasq[0].cachesize='10000'
+  uci -q set dhcp.@dnsmasq[0].dnsforwardmax='1000'
+  uci -q set dhcp.@dnsmasq[0].rebind_protection='0'
+  log "dnsmasq: cachesize=10000 noresolv=1 上游 3 条 重绑定保护=关"
+else
+  log "警告：dhcp.@dnsmasq[0] 不存在，DNS 参数未写入"
+fi
+
+# ---------------------------------------------------------------
+# 4. 内网 NTP：本机当服务器 + option 42 下发 + 防火墙放行 UDP 123
+# ---------------------------------------------------------------
+if ! uci -q get system.ntp >/dev/null 2>&1; then
+  uci -q set system.ntp=timeserver
+fi
+uci -q set system.ntp.enable_server='1'
+uci -q delete system.ntp.server 2>/dev/null
+uci -q add_list system.ntp.server='ntp.aliyun.com'
+uci -q add_list system.ntp.server='time1.cloud.tencent.com'
+uci -q add_list system.ntp.server='cn.pool.ntp.org'
+uci -q commit system
+
+# 只补 42，不动已有的 option 6/3 等
+if ! uci -q get dhcp.lan.dhcp_option 2>/dev/null | grep -q '^42,'; then
+  uci -q add_list dhcp.lan.dhcp_option='42,192.168.1.1'
+fi
+uci -q commit dhcp
+
+# 具名 rule，先删后建保证幂等
+uci -q delete firewall.lan_ntp 2>/dev/null
+uci -q batch <<'UCI'
+set firewall.lan_ntp=rule
+set firewall.lan_ntp.name='Allow-LAN-NTP'
+set firewall.lan_ntp.src='lan'
+set firewall.lan_ntp.proto='udp'
+set firewall.lan_ntp.dest_port='123'
+set firewall.lan_ntp.target='ACCEPT'
+commit firewall
+UCI
+log "NTP: enable_server=1, DHCP option 42, 防火墙放行 UDP 123"
+
+# ---------------------------------------------------------------
+# 5. 运行期关 IPv6（编译期 CONFIG_IPV6 / CONFIG_KERNEL_IPV6 已关）
+#    编译期已经把 odhcp6c / odhcpd-ipv6only / luci-proto-ipv6 剔除，
+#    这里再清掉残留配置，避免旧配置升级时回魂。
+# ---------------------------------------------------------------
+uci -q delete network.wan6 2>/dev/null
+uci -q delete network.globals.ula_prefix 2>/dev/null
+uci -q delete dhcp.lan.ra 2>/dev/null
+uci -q delete dhcp.lan.dhcpv6 2>/dev/null
+uci -q delete dhcp.lan.ndp 2>/dev/null
+uci -q delete dhcp.lan.ra_management 2>/dev/null
+uci -q commit network
+uci -q commit dhcp
+if [ -x /etc/init.d/odhcpd ]; then
+  /etc/init.d/odhcpd disable >/dev/null 2>&1 || true
+fi
+log "IPv6: wan6 / ULA / RA / DHCPv6 / NDP 已清，odhcpd 已禁用（若存在）"
+
+exit 0
