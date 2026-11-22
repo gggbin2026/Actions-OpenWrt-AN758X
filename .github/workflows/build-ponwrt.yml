@@ -67,13 +67,13 @@ on:
       profile:
         description: '机型 profile (all=全机型编译)'
         required: true
-        default: 'fiberhome_hg5585f-ct'
+        default: 'fiberhome_an4475-g2'
         type: choice
         options:
           - fiberhome_hg5585f-ct
           - nokia_xg-040g-md-ubi
-        
-        opt_arm64ce:
+          - all
+      opt_arm64ce:
         description: 'arm64 汇编加密实现（AN7581 走 NEON 位切片 / AN7583 走 CE，按 SoC 自动选）'
         required: false
         default: '0'
