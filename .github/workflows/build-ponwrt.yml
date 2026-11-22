@@ -139,7 +139,7 @@ on:
           - 'true'
           - 'false'
       fw_author:
-        description: '覆盖固件版本后缀的作者名（LuCI 概览页「固件版本」）。留空 = qwe'
+        description: '覆盖固件版本后缀的作者名（LuCI 概览页「固件版本」）。留空 = gggbin2026'
         required: false
         default: 'gggbin2026'
       upload_release:
