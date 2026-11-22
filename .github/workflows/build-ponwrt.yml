@@ -29,6 +29,12 @@ env:
   IGNORE_CACHE: ${{ github.event.inputs.ignore_cache || 'false' }}
   FW_BUILD_TIME: ''                 # 留空 = 自动取构建时时间（Asia/Shanghai）
   FW_DESC_SUFFIX: ''               # 留空 = "· qwe · <构建时间>"；填了则完全自定义
+  # 固件 Release 策略：GitHub Release 本身没有过期时间（长期有效），
+  # 为控制仓库体积，只保留最近 5 次成功发布的固件 Release，更早的自动删除。
+  # 只清理 fw- 前缀；cache-backup（工具链缓存）与旧版滚动 Release 一律不动。
+  KEEP_FW_RELEASES: '5'
+  RELEASE_LOG_FILE: RELEASES.md      # 每次发布自动往仓库这个文件追加一行记录
+  CLEAN_WORKFLOW_RUNS: 'false'       # 默认不删 workflow run 日志，方便倒查
   # 固件文件名插入构建时间戳。下划线无冒号：upload-artifact 拒绝 `: " < > | * ?`。
   # 改名后同名覆盖失效，旧资产会累积在同一个 Release，需手动清理。
   FW_TS_NAME: 'true'
@@ -67,7 +73,7 @@ on:
       profile:
         description: '机型 profile (all=全机型编译)'
         required: true
-        default: 'fiberhome_an4475-g2'
+        default: 'fiberhome_hg5585f-ct'
         type: choice
         options:
           - fiberhome_hg5585f-ct
@@ -135,7 +141,7 @@ on:
       fw_author:
         description: '覆盖固件版本后缀的作者名（LuCI 概览页「固件版本」）。留空 = qwe'
         required: false
-        default: 'qwe'
+        default: 'gggbin2026'
       upload_release:
         description: '固件发布到 Release（false 则只传 Artifact）'
         required: false
@@ -1731,9 +1737,11 @@ jobs:
           name: OpenWrt_firmware_${{ env.DEVICE_NAME }}${{ env.FILE_DATE }}
           path: ${{ env.FIRMWARE }}
 
-      - name: Generate release tag
+      - name: Generate release tag and notes
         id: tag
         if: env.UPLOAD_RELEASE == 'true' && steps.compile.outputs.status == 'success'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           # 没产出固件就别发空 Release
           if [ -z "$FIRMWARE" ] || [ -z "$(ls -A "$FIRMWARE" 2>/dev/null)" ]; then
@@ -1741,48 +1749,117 @@ jobs:
             exit 0
           fi
 
-          # 固定 tag = 机型 + 分支；重编时更新同一个 Release，不新建版本
-          RELEASE_TAG=$(echo "${DEVICE_NAME}-${REPO_BRANCH}" | sed 's/[^a-zA-Z0-9._-]/-/g')
+          # ---------- 按时间生成独立 tag（Asia/Shanghai，精确到秒） ----------
+          # 同一秒重跑 / Re-run jobs 用 -r<run>a<attempt> 保证不撞名。
+          STAMP="$(date '+%Y%m%d-%H%M%S')"
+          RELEASE_TAG="fw-${PROFILE}-${STAMP}-r${GITHUB_RUN_ID}a${GITHUB_RUN_ATTEMPT}"
+          RELEASE_TAG=$(printf '%s' "$RELEASE_TAG" | sed 's/[^a-zA-Z0-9._-]/-/g')
           echo "release_tag=${RELEASE_TAG}" >> "$GITHUB_OUTPUT"
+          echo "release_stamp=${STAMP}" >> "$GITHUB_OUTPUT"
 
-          touch release.txt
-          # 说明里的时间由文件名反推，两处永远同一秒
           if [ -n "${FW_TS:-}" ]; then
             BUILD_TIME=$(printf '%s' "$FW_TS" | sed -E \
               's/^([0-9]{4}-[0-9]{2}-[0-9]{2})_([0-9]{2})([0-9]{2})([0-9]{2})\(Shanghai\)$/\1 \2:\3:\4 (Shanghai)/')
           else
             BUILD_TIME="$(date '+%Y-%m-%d %H:%M:%S') (Shanghai)"
           fi
+          echo "build_time=${BUILD_TIME}" >> "$GITHUB_OUTPUT"
+          echo "release_title=${PROFILE} · ${BUILD_TIME}" >> "$GITHUB_OUTPUT"
+
+          # ---------- 机型中文名（给下载的人看） ----------
+          case "$PROFILE" in
+            fiberhome_hg5585f-ct)     DEV_CN="烽火 HG5585F-CT 电信版（XG-PON 网关，MT7916D WiFi）" ;;
+            fiberhome_hg5585f-cu)     DEV_CN="烽火 HG5585F-CU 联通版（XG-PON 网关，MT7916D WiFi）" ;;
+            fiberhome_hg5382a)        DEV_CN="烽火 HG5382A" ;;
+            nokia_xg-040g-md-ubi)     DEV_CN="Nokia XG-040G-MD（UBI，双 USB，无 WiFi）" ;;
+            nokia_xg-040g-tf-ubi)     DEV_CN="Nokia XG-040G-TF（UBI）" ;;
+            nokia_xg-040g-mf)         DEV_CN="Nokia XG-040G-MF（AN7583）" ;;
+            nokia_xg-040g-mf-ubi)     DEV_CN="Nokia XG-040G-MF（UBI，AN7583）" ;;
+            gemtek_xg2010g)           DEV_CN="Gemtek XG2010G" ;;
+            unionman_ung00a)          DEV_CN="Unionman UNG00A" ;;
+            znxt_zn504xg-d)           DEV_CN="兆能 ZNXT ZN504XG-D" ;;
+            znxt_zn515xg-d)           DEV_CN="兆能 ZNXT ZN515XG-D" ;;
+            h3c_hm2004-du)            DEV_CN="H3C HM2004-DU（FTTR，需私有仓库凭证）" ;;
+            *)                        DEV_CN="$PROFILE" ;;
+          esac
+          echo "dev_cn=${DEV_CN}" >> "$GITHUB_OUTPUT"
+
+          # ---------- 主固件名 ----------
+          MAIN_FW="$(cd "$FIRMWARE" && ls -1 *-squashfs-sysupgrade*.itb 2>/dev/null | head -1)"
+          [ -z "$MAIN_FW" ] && MAIN_FW="$(cd "$FIRMWARE" && ls -1 | head -1)"
+          echo "main_fw=${MAIN_FW}" >> "$GITHUB_OUTPUT"
+
+          SRC_COMMIT="$(cd "$BUILD_ROOT"/openwrt && git rev-parse --short HEAD)"
+
+          # =========================================================
+          # Release 说明 —— 让下载的人一眼看清：固件叫什么、给哪台光猫、
+          # 里面编了什么、刷之前要注意什么。
+          # =========================================================
           {
-            echo "## PonWrt 自动编译固件"
+            echo "# ${DEV_CN} · ${BUILD_TIME}"
             echo ""
-            echo "### 编译信息"
-            echo "| 项目 | 详情 |"
+            echo "> 本 Release 由 GitHub Actions 自动生成，tag 按编译时间命名；"
+            echo "> 「做了哪些配置 / 内置插件」两段由本次编译的最终 \`.config\` 实读生成，"
+            echo "> 不手抄、不会与固件内容对不上。"
+            echo ""
+            echo "## 一、这次发的是什么"
+            echo ""
+            echo "| 项目 | 内容 |"
             echo "|------|------|"
-            echo "| 机型 | \`${PROFILE}\` |"
+            echo "| 适用光猫 | **${DEV_CN}** |"
+            echo "| 机型 profile | \`${PROFILE}\` |"
             echo "| SoC | \`${SOC}\` |"
-            echo "| 作者 | \`${FW_AUTHOR}\` |"
-            echo "| 源码 | ${REPO_URL} |"
-            echo "| 分支 | \`${REPO_BRANCH}\` |"
-            echo "| 提交 | \`$(cd "$BUILD_ROOT"/openwrt && git rev-parse --short HEAD)\` |"
+            echo "| 固件名称（主文件） | \`${MAIN_FW}\` |"
+            echo "| Release tag | \`${RELEASE_TAG}\` |"
             echo "| 编译时间 | ${BUILD_TIME} |"
+            echo "| 源码 | ${REPO_URL} @ \`${REPO_BRANCH}\` |"
+            echo "| 源码提交 | \`${SRC_COMMIT}\` |"
+            echo "| Host 模式 | \`${HOST_MODE}\` |"
             echo "| 加密加速 | ARM64CE=${OPT_CRYPTO_ARM64CE} / ChaCha=${OPT_CRYPTO_CHACHA} / EIP93=${OPT_CRYPTO_EIP93} |"
+            echo "| 内核 / 包管理 | Linux 6.18 / apk（全量签名） |"
             echo ""
-            echo "### 固件文件校验"
+            echo "## 二、出厂默认（刷完机就是这样）"
+            echo ""
+            echo "| 项 | 值 |"
+            echo "|----|----|"
+            echo "| 管理地址 | \`http://192.168.1.1\` |"
+            echo "| 账号 / 密码 | \`root\` / \`admin\` |"
+            echo "| 时区 | Asia/Shanghai（UTC+8） |"
+            echo "| IPv6 | **关闭**（内核 + RA/DHCPv6/ULA/wan6 全关） |"
+            echo "| 内网 NTP | 本机 \`192.168.1.1:123\`，DHCP option 42 自动下发 |"
+            echo "| DNS | dnsmasq 缓存 10000，上游 \`223.5.5.5\` / \`119.29.29.29\` / \`114.114.114.114\` |"
+            echo "| 默认主题 | ARGON |"
+            echo "| 界面语言 | 简体中文 |"
+            echo ""
+            echo "> 以上由 \`files/etc/uci-defaults/99-z-custom-defaults\` 在**首次开机**写入；"
+            echo "> 编译期另在 \`configs/*.config\` 关掉 IPv6 内核栈与 odhcp6c/odhcpd。"
+            echo "> ⚠ 跨版本 sysupgrade **不要勾「保留配置」**：旧 \`/etc/shadow\` 会盖掉 "
+            echo "> \`root/admin\`，旧 \`/etc/config/*\` 会盖掉 DNS/NTP/IPv6 设置。"
+            echo "> 完整参数与 DNS 该填什么见仓库 \`固件发布日志.md\`。"
+            echo ""
+            echo "## 三、本次固件文件"
+            echo ""
+            echo '```'
+            (cd "$FIRMWARE" && ls -1)
+            echo '```'
+            echo ""
+            echo "## 四、校验值（SHA256）"
+            echo ""
             echo '```'
             (cd "$FIRMWARE" && sha256sum * 2>/dev/null | grep -vE "sha256sums|packages")
             echo '```'
             echo ""
-            echo "---"
-            if [ -n "${FW_TS:-}" ]; then
-              echo "> 本 Release 为滚动发布页；追加了文件名时间戳，历史产物**不删除**，按时间戳区分新旧。"
-              echo "> 固件文件名尾部的 \`${FW_TS}\` 是本次编译时间，取时间戳最大的那份刷机即可。"
-            else
-              echo "> 本 Release 为滚动发布页，仅保留最新一次编译产物。"
-            fi
-            echo "> 安装前请用 AN758x-Stock2UBI 备份原厂 flash，刷机后恢复 PON/校准数据。"
-          } >> release.txt
+          } > release.txt
+
+          # ---------- 从最终 .config 实读：配置摘要 + 内置插件清单 ----------
+          # 逻辑放在 scripts/gen-release-notes.py，避免在 YAML 块标量里嵌
+          # 带缩进的 Python（heredoc 会把缩进一起喂给解释器，必报 IndentationError）。
+          BUILD_ROOT="$BUILD_ROOT" PROFILE="$PROFILE" RELEASE_TXT="$PWD/release.txt" \
+          DEV_CN="$DEV_CN" RELEASE_TAG="$RELEASE_TAG" \
+          KEEP_FW_RELEASES="$KEEP_FW_RELEASES" \
+          python3 "$GITHUB_WORKSPACE/scripts/gen-release-notes.py"
           echo "status=success" >> "$GITHUB_OUTPUT"
+          echo "release_tag=${RELEASE_TAG}  title=${PROFILE} · ${BUILD_TIME}"
 
       - name: Upload firmware to release
         uses: softprops/action-gh-release@v2
@@ -1791,6 +1868,7 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         with:
           tag_name: ${{ steps.tag.outputs.release_tag }}
+          name: "${{ steps.tag.outputs.dev_cn }} · ${{ steps.tag.outputs.build_time }}"
           body_path: release.txt
           make_latest: true
           # 不同机型产物后缀不同，缺哪种都别让这一步失败
@@ -1807,24 +1885,101 @@ jobs:
             ${{ env.FIRMWARE }}/*.manifest
             ${{ env.FIRMWARE }}/*.json
 
+      - name: Append to repository release log
+        # 往仓库 RELEASES.md 追加一行；push/API 写文件不触发本 workflow
+        # （on 只有 workflow_dispatch / repository_dispatch）。
+        # 并发写同一文件可能撞车，失败只警告，不影响固件发布。
+        continue-on-error: true
+        if: steps.tag.outputs.status == 'success' && env.UPLOAD_RELEASE == 'true'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          LOG_FILE: ${{ env.RELEASE_LOG_FILE }}
+        run: |
+          REPO="$GITHUB_REPOSITORY"
+          TAG='${{ steps.tag.outputs.release_tag }}'
+          STAMP='${{ steps.tag.outputs.release_stamp }}'
+          DEV='${{ steps.tag.outputs.dev_cn }}'
+          PROFILE_V='${{ env.PROFILE }}'
+          COMMIT="$(cd "$BUILD_ROOT"/openwrt && git rev-parse --short HEAD)"
+          LINE="| ${STAMP} | ${DEV} | \`${PROFILE_V}\` | [\`${TAG}\`](https://github.com/${REPO}/releases/tag/${TAG}) | \`${COMMIT}\` | 按时间生成 · 保留最近 ${KEEP_FW_RELEASES} 次 |"
+
+          BRANCH="${GITHUB_REF_NAME:-main}"
+          API="repos/${REPO}/contents/${LOG_FILE}"
+          META="$(gh api "${API}?ref=${BRANCH}" 2>/dev/null || true)"
+          SHA="$(printf '%s' "$META" | jq -r '.sha // empty' 2>/dev/null || true)"
+          OLD="$(printf '%s' "$META" | jq -r '.content // empty' 2>/dev/null | base64 -d 2>/dev/null || true)"
+          if [ -z "$OLD" ]; then
+            # 用 printf 拼接：避免 YAML 块标量里出现 0 缩进的 '>' 行被误解析
+            OLD="$(printf '%s\n' \
+              '# 固件发布记录' \
+              '' \
+              '> 本文件由 Build PonWrt 每次成功发布后自动追加一行，可长期倒查。' \
+              '> 完整规则、机型对照、配置与插件清单见 `固件发布日志.md`；' \
+              '> 每一次发布的详细说明见对应 Release 页面。' \
+              '' \
+              '| 编译时间（Asia/Shanghai） | 适用光猫 | profile | Release | 源码提交 | 备注 |' \
+              '|---|---|---|---|---|---|')"
+          fi
+          NEW="$(printf '%s\n%s\n' "$OLD" "$LINE")"
+          B64="$(printf '%s' "$NEW" | base64 -w0)"
+          if [ -n "$SHA" ]; then
+            gh api -X PUT "$API" -f message="chore: 记录固件发布 ${TAG}" \
+              -f content="$B64" -f sha="$SHA" -f branch="$BRANCH" >/dev/null
+          else
+            gh api -X PUT "$API" -f message="chore: 创建固件发布记录 ${TAG}" \
+              -f content="$B64" -f branch="$BRANCH" >/dev/null
+          fi
+          echo "✅ 已追加发布记录: ${LINE}"
+
       - name: Delete workflow runs
-        if: steps.compile.outputs.status == 'success'
+        # 默认停用：run 日志和 Artifact 是排查编译问题的唯一线索，
+        # 长期保留不影响 Release 体积。想启用把 env.CLEAN_WORKFLOW_RUNS 改成 'true'。
+        if: steps.compile.outputs.status == 'success' && env.CLEAN_WORKFLOW_RUNS == 'true'
         uses: Mattraks/delete-workflow-runs@v2
         with:
           token: ${{ secrets.GITHUB_TOKEN }}
-          retain_days: 7
-          keep_minimum_runs: 10
+          retain_days: 90
+          keep_minimum_runs: 20
 
-      - name: Remove old releases
-        uses: dev-drprasad/delete-older-releases@v0.3.4
-        # 必须 success()：失败时删 tag 会让已发布的下载链接全部 404
-        if: env.UPLOAD_RELEASE == 'true' && success()
-        with:
-          keep_latest: 10
-          delete_tags: true
-          delete_tag_pattern: '^${{ env.DEVICE_NAME }}-'
+      - name: Keep latest firmware releases (prune old fw-*)
+        # GitHub Release 无过期时间；为省空间只留最近 5 次固件发布。
+        # 只删 fw- 前缀，cache-backup（工具链缓存）和旧版滚动 Release 一律不动。
+        # 必须 success()：构建失败时删 Release 会让已有下载链接 404。
+        continue-on-error: true
+        if: env.UPLOAD_RELEASE == 'true' && steps.tag.outputs.status == 'success' && success()
         env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          KEEP: ${{ env.KEEP_FW_RELEASES }}
+          CURRENT_TAG: ${{ steps.tag.outputs.release_tag }}
+        run: |
+          echo "保留策略: fw-* Release 只保留最近 ${KEEP} 个（本次 ${CURRENT_TAG} 绝不删）"
+          if ! gh release list --repo "$GITHUB_REPOSITORY" --limit 200 \
+            --json tagName,createdAt \
+            --jq '[.[] | select(.tagName | startswith("fw-"))] | sort_by(.createdAt) | reverse' \
+            > /tmp/fw_releases.json 2>/dev/null; then
+            echo "::warning::列 Release 失败（API 限流？），本次跳过清理，下次编译会补上"
+            exit 0
+          fi
+          TOTAL="$(jq 'length' /tmp/fw_releases.json 2>/dev/null || echo 0)"
+          echo "当前 fw-* Release 共 ${TOTAL} 个"
+          jq -r --argjson keep "${KEEP}" '.[$keep:] | .[].tagName' /tmp/fw_releases.json \
+            > /tmp/fw_prune.txt 2>/dev/null || true
+          if [ ! -s /tmp/fw_prune.txt ]; then
+            echo "✅ 未超过 ${KEEP} 个，无需清理"
+            exit 0
+          fi
+          while IFS= read -r TAG; do
+            [ -z "$TAG" ] && continue
+            # 双保险：即使 API 有延迟没列到本次 Release，也绝不删刚发的这个
+            [ "$TAG" = "$CURRENT_TAG" ] && { echo "跳过本次 Release: ${TAG}"; continue; }
+            echo "--- 删除过期固件 Release: ${TAG}"
+            gh release delete "$TAG" --repo "$GITHUB_REPOSITORY" --yes 2>/dev/null \
+              || echo "::warning::${TAG} Release 删除失败（可能已被手动删除）"
+            # gh release delete 在部分版本会保留远端 tag，显式再删一次，避免残留空 tag
+            gh api -X DELETE "repos/${GITHUB_REPOSITORY}/git/refs/tags/${TAG}" >/dev/null 2>&1 \
+              || true
+          done < /tmp/fw_prune.txt
+          echo "✅ 清理完成，保留最近 ${KEEP} 次固件发布"
 
   # 缓存轮换：单独成 job 是为了能上 concurrency，且失败不影响构建结论。
   # 脚本先确认当前 key 已在缓存里再删，避免删掉唯一一份。
