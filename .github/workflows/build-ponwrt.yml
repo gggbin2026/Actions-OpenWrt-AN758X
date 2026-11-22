@@ -787,33 +787,15 @@ jobs:
           fi
 
           # ---------------------------------------------------------------
-          # iStore 依赖链写回（2026-11-22 补回）
-          # 上游同步把这段整段删了，但 diy-part1.sh 仍是「iStore 放
-          # package/custom」的定制版：luci-app-store 的 APK depends 里带
-          # tar / curl / libuci-lua / luci-lua-runtime / xz / liblua 等，
-          # 基座 configs/<soc>.config 把这些写成 "# ... is not set"，
-          # defconfig 对不可见符号既不写 =y 也不写 "is not set"、不报 WARNING，
-          # 于是 packages.adb 里缺包，apk 装镜像时报
-          #   "xxx (no such package): required by: luci-app-store"。
-          # 本步骤之后不再跑 defconfig，写回的值不会被再次抹掉。
+          # iStore 依赖链写回 —— 2026-11-22 已整段移除（本版不要 iStore）
+          #   diy-part1.sh 里 ADD_ISTORE=false，config 里 luci-app-store /
+          #   luci-lib-taskd / luci-lib-xterm / taskd 四行全部 is not set，
+          #   不再需要 defconfig 之后硬写回任何符号。
+          #   run #23 的 tar-1.35-r2.apk 编译失败正是这段把 CONFIG_PACKAGE_tar=y
+          #   写回、而 Kconfig 已没机会展开 tar 的 DEPENDS 导致的；整段移除后
+          #   根因自然消失。
+          #   FastNet / USB 打印 / 12 插件 / 出厂默认均不依赖 iStore，不受影响。
           # ---------------------------------------------------------------
-          ISTORE_SYMS="luci-app-store luci-lib-taskd luci-lib-xterm taskd \
-                       tar curl libuci-lua luci-lua-runtime mount-utils \
-                       coreutils coreutils-stty script-utils procd \
-                       xz xz-utils liblzma liblua libuci uci"
-          ISTORE_WROTE=""
-          for s in $ISTORE_SYMS; do
-            if ! grep -q "^CONFIG_PACKAGE_${s}=y" .config; then
-              sed -i "/^# CONFIG_PACKAGE_${s} is not set$/d; /^CONFIG_PACKAGE_${s}=m$/d" .config
-              printf 'CONFIG_PACKAGE_%s=y\n' "$s" >> .config
-              ISTORE_WROTE="$ISTORE_WROTE $s"
-            fi
-          done
-          if [ -n "$ISTORE_WROTE" ]; then
-            echo "✅ defconfig 后已写回 iStore 依赖链:$ISTORE_WROTE"
-          else
-            echo "✅ iStore 依赖链符号均在 .config 中为 =y"
-          fi
 
           # 关键包校验：defconfig 会静默剔除 feeds 里不存在的包，光口链路必须还在
           MISSING=""
@@ -1343,6 +1325,64 @@ jobs:
           fi
           echo "dl 目录共 $(ls -1 dl 2>/dev/null | wc -l) 个文件"
 
+      - name: Apply optional ONU flowtable patch
+        # 2026-11-22 修复：diy-part1.sh 原来在源码树里找
+        #   package/network/config/firewall4/root/usr/share/ucode/fw4.uc
+        # 但 firewall4 是 PKG_SOURCE_PROTO=git 的「外部源码包」，fw4.uc 只存在于
+        # build_dir 里解压后的源码，源码树根本没有 —— 所以每轮都打
+        # 「未找到 firewall4/fw4.uc 或补丁文件，跳过 flowtable 补丁」的假 warning，
+        # 补丁从未生效过。这里改在 make download 之后、prepare 解压出源码再打。
+        #   · patch --dry-run 先校验上下文，不适用只 warning，绝不阻断编译
+        #   · 整个步骤 continue-on-error，失败也不影响固件
+        #   · 不想要这个补丁：把下面的 APPLY_FW4_PATCH 改成 'false'
+        id: fw4_patch
+        if: env.BUILD_SCOPE != 'toolchain-only' && steps.package.outcome == 'success'
+        continue-on-error: true
+        env:
+          APPLY_FW4_PATCH: 'true'
+        run: |
+          cd "$BUILD_ROOT/openwrt"
+          mkdir -p "$GITHUB_WORKSPACE/build-logs"
+
+          if [ "$APPLY_FW4_PATCH" != "true" ]; then
+            echo "APPLY_FW4_PATCH=false，已禁用 flowtable 补丁"
+            exit 0
+          fi
+
+          PATCH_URL="https://raw.githubusercontent.com/naoki66/OpenWrt_ONU_CONFIG/main/patches/firewall4/010-fw4-zone-device-flowtable.patch"
+          PATCH_FILE="$GITHUB_WORKSPACE/onu-fw4-flowtable.patch"
+          if ! curl -fsSL --retry 3 --max-time 60 "$PATCH_URL" -o "$PATCH_FILE"; then
+            echo "::warning::flowtable 补丁下载失败，跳过（不影响固件）"
+            exit 0
+          fi
+
+          # 把 firewall4 的 git 源码解压到 build_dir（make download 已拉过 tarball，很快）
+          if ! make -s package/network/config/firewall4/prepare V=s >> "$GITHUB_WORKSPACE/build-logs/fw4-prepare.log" 2>&1; then
+            echo "::warning::firewall4 prepare 失败，跳过补丁（详见 build-logs/fw4-prepare.log）"
+            exit 0
+          fi
+
+          FW4_UC="$(find build_dir -path '*/firewall4*/root/usr/share/ucode/fw4.uc' -type f -print -quit 2>/dev/null)"
+          if [ -z "$FW4_UC" ]; then
+            echo "::warning::build_dir 里没找到 fw4.uc，跳过补丁（不影响固件）"
+            exit 0
+          fi
+          # <FW4_SRC>/root/usr/share/ucode/fw4.uc -> 上溯 4 级到 firewall4-* 源码根
+          FW4_SRC="$(cd "$(dirname "$FW4_UC")/../../../.." && pwd)"
+
+          if grep -q 'zone_offload_devices' "$FW4_UC"; then
+            echo "✅ firewall4 已包含 zone_offload_devices（上游已合并），无需补丁"
+            exit 0
+          fi
+
+          if (cd "$FW4_SRC" && patch --dry-run -p1 --forward < "$PATCH_FILE" >/dev/null 2>&1); then
+            (cd "$FW4_SRC" && patch -p1 --forward < "$PATCH_FILE" >/dev/null) \
+              && echo "✅ ONU: 已应用 firewall4 flowtable 补丁（zone.device 纳入硬件卸载）" \
+              || echo "::warning::补丁应用返回非 0，跳过（不影响固件）"
+          else
+            echo "::warning::flowtable 补丁不适用当前 firewall4（上下文不匹配），跳过；ONU 菜单不受影响"
+          fi
+
       # 存 dl 缓存必须放在编译之前：350 分钟到点被 cancel，后面 always() 也来不及。
       # ⚠ 只在 make download 真成功时存，否则残缺 dl 会占掉本周的 key。
       - name: Save dl cache
@@ -1501,7 +1541,11 @@ jobs:
 
           # 注解：run 页面首屏就能看到，不用登录、不用下载 artifact。
           # 单步最多 10 条 error 注解，这里只发 4 条，多的会被 GitHub 丢掉。
-          ERRS=$(grep -nE '(^|[[:space:]])(ERROR:|error:|\*\*\* .*Error [0-9]+|make(\[[0-9]+\])?: \*\*\*)|unable to select packages|no such package|Image too big' \
+          # 2026-11-22 通读 run #23 完整日志后放宽：
+          #   真错误是「Package tar is missing dependencies for the following libraries:
+          #   libacl.so.1」，旧正则只认 ERROR:/error:/***，整行被漏掉，
+          #   首屏只剩 make 的包装层。补上打包 / 链接 / 安装类常见失败措辞。
+          ERRS=$(grep -nE '(^|[[:space:]])(ERROR:|error:|\*\*\* .*Error [0-9]+|make(\[[0-9]+\])?: \*\*\*)|unable to select packages|no such package|Image too big|missing dependencies for the following libraries|cannot stat|No such file|undefined reference|cannot find -l|No space left|configure: error|apk: .*error|Permission denied|is missing dependencies' \
                    "$LOG" | tail -20 | tr -d '\r' || true)
           if [ -n "$ERRS" ]; then
             # 只发最后 4 条：越靠后越接近根因，前面的多半是包装层
