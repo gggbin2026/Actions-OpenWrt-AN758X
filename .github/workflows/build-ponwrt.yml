@@ -19,7 +19,7 @@ env:
   RUST_PIN_FEED: false
   CACHE_ROOT: /workdir/openwrt
   CACHE_RELEASE: cache-backup
-  RELEASE_BACKUP: ${{ github.event.inputs.release_backup == 'false' && 'false' || 'true' }}
+  RELEASE_BACKUP: ${{ github.event.inputs.release_backup == 'true' && 'true' || 'false' }}
   TZ: Asia/Shanghai
   FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
   REPO_BRANCH: ${{ github.event.inputs.branch || 'master' }}
@@ -33,6 +33,9 @@ env:
   # 为控制仓库体积，只保留最近 5 次成功发布的固件 Release，更早的自动删除。
   # 只清理 fw- 前缀；cache-backup（工具链缓存）与旧版滚动 Release 一律不动。
   KEEP_FW_RELEASES: '5'
+  # 救砖镜像（initramfs-recovery）是否也作为**独立**附件传 Release。
+  # 默认 false：下载页只放刷机那一个固件，最直观也最小；改 true 两个固件并列。
+  UPLOAD_RECOVERY: 'false'
   RELEASE_LOG_FILE: RELEASES.md      # 每次发布自动往仓库这个文件追加一行记录
   CLEAN_WORKFLOW_RUNS: 'false'       # 默认不删 workflow run 日志，方便倒查
   # 固件文件名插入构建时间戳。下划线无冒号：upload-artifact 拒绝 `: " < > | * ?`。
@@ -122,9 +125,9 @@ on:
           - 'false'
           - 'true'
       release_backup:
-        description: 'Release 备份通道（actions/cache 7 天无访问会回收，Release 不会）'
+        description: '工具链缓存是否存成 Release（默认关：下载页不出现缓存文件；cache-keepalive 每 3 天保活 actions/cache）'
         required: false
-        default: 'true'
+        default: 'false'
         type: choice
         options:
           - 'true'
@@ -2022,19 +2025,22 @@ jobs:
           path: ${{ env.FIRMWARE }}
 
       # ---------------------------------------------------------------
-      # 固件压缩（2026-11-23）：80+ MB 的 .itb 打成一个 .tar.zst 再发 Release
-      #   · Artifact 上一步已上传完毕，里面仍是原始裸固件，调试/owut 不受影响
-      #   · Release 只传压缩包 + manifest/json/sha256sums（见下方 files 列表）
-      #   · UBI/FIT 镜像尾部有大量 0xFF padding，zstd -19 压缩率很高
-      #   · 解压：tar -I zstd -xf <名字>.tar.zst  → 得到原始 .itb 再刷
+      # 固件文件处理（2026-11-23 二次改版）
+      #   · 之前把 recovery + sysupgrade 两个镜像 tar 成一个 .tar.zst，
+      #     "2 合 1" 不直观，且 recovery（含完整 rootfs）几乎压不动，
+      #     结果 147.77 MB → 122.99 MB，比单个裸 sysupgrade(78 MB) 还大。
+      #   · 现在**每个镜像各自压成一个同名 .zst**，一个文件对应一个固件，
+      #     文件名直接带 squashfs-sysupgrade / initramfs-recovery，一眼可分。
+      #   · 默认只把刷机用的 sysupgrade 传 Release；救砖镜像留在 Artifact。
+      #     把 env.UPLOAD_RECOVERY 改成 'true' 则两个独立附件并列（完全分开）。
+      #   · 解压：zstd -d <文件>.zst（或 gunzip <文件>.gz）→ 得到 .itb
       # ---------------------------------------------------------------
-      - name: Compress firmware for release
+      - name: Prepare independent firmware files
         id: compress
         if: steps.organize.outputs.status == 'success' && env.UPLOAD_RELEASE == 'true'
         run: |
           cd "$FIRMWARE"
 
-          # 用数组：stamp 后的文件名带 (Shanghai) 括号，普通字符串拼接会踩 word splitting
           IMAGES=()
           for f in *.itb *.bin *.ubi *.img *.fit *.trx; do
             [ -f "$f" ] && IMAGES+=("$f")
@@ -2045,33 +2051,49 @@ jobs:
             exit 0
           fi
 
-          BEFORE=0
-          for f in "${IMAGES[@]}"; do BEFORE=$((BEFORE + $(stat -c %s "$f"))); done
-          echo "  打包镜像: ${IMAGES[*]}"
+          HAVE_ZSTD=0
+          command -v zstd >/dev/null 2>&1 && HAVE_ZSTD=1
+          [ "$HAVE_ZSTD" -eq 0 ] && echo "::warning::runner 没有 zstd，回退 gzip -9"
 
-          ARCHIVE="ponwrt-${PROFILE}-firmware.tar.zst"
-          if command -v zstd >/dev/null 2>&1; then
-            tar -I 'zstd -19 -T0 -q' -cf "$ARCHIVE" "${IMAGES[@]}"
-          else
-            echo "::warning::runner 没有 zstd，回退 gzip（体积略大）"
-            ARCHIVE="ponwrt-${PROFILE}-firmware.tar.gz"
-            tar -czf "$ARCHIVE" "${IMAGES[@]}"
+          BEFORE=0; AFTER=0
+          RELEASE_FILES=()
+          for f in "${IMAGES[@]}"; do
+            case "$f" in
+              *initramfs*recovery*|*recovery*initramfs*)
+                if [ "${UPLOAD_RECOVERY:-false}" != 'true' ]; then
+                  echo "  ⏭ 独立留在 Artifact（不进下载页）: $f ($(( $(stat -c %s "$f") /1048576 )) MiB)"
+                  continue
+                fi
+                ;;
+            esac
+            BEFORE=$((BEFORE + $(stat -c %s "$f")))
+            if [ "$HAVE_ZSTD" -eq 1 ]; then
+              OUT="${f}.zst"
+              zstd -19 -T0 -q -f "$f" -o "$OUT"
+            else
+              OUT="${f}.gz"
+              gzip -9 -c "$f" > "$OUT"
+            fi
+            SZ=$(stat -c %s "$OUT")
+            AFTER=$((AFTER + SZ))
+            RELEASE_FILES+=("$OUT")
+            echo "  ✅ 独立固件: $OUT ($(( SZ /1048576 )) MiB)"
+          done
+
+          if [ "${#RELEASE_FILES[@]}" -eq 0 ]; then
+            echo "::error::过滤后没有任何固件可发布（检查 UPLOAD_RECOVERY 与镜像命名）"
+            exit 1
           fi
-
-          AFTER=$(stat -c %s "$ARCHIVE")
-          echo "  压缩前合计: $BEFORE B ($((BEFORE/1024/1024)) MiB)"
-          echo "  压缩包: $ARCHIVE → $AFTER B ($((AFTER/1024/1024)) MiB)"
+          echo "  压缩前合计: $(( BEFORE /1048576 )) MiB → 独立文件合计: $(( AFTER /1048576 )) MiB"
           if [ "$BEFORE" -gt 0 ]; then
-            echo "  节省: $(( (BEFORE-AFTER)*100/BEFORE ))%"
-            echo "  固件压缩节省 $(( (BEFORE-AFTER)*100/BEFORE ))% ($((BEFORE/1024/1024)) → $((AFTER/1024/1024)) MiB)" >> "$GITHUB_STEP_SUMMARY"
+            echo "  节省 $(( (BEFORE-AFTER)*100/BEFORE ))%" 
+            echo "固件独立压缩节省 $(( (BEFORE-AFTER)*100/BEFORE ))%（$(( BEFORE /1048576 )) → $(( AFTER /1048576 )) MiB）" >> "$GITHUB_STEP_SUMMARY"
           fi
 
-          # stamp 步骤算过一次 sha256sums，现在多了压缩包，重算一遍
+          # 只列实际上传的文件算校验和，避免说明里出现一堆下载不到的条目
           rm -f sha256sums
-          sha256sum * > sha256sums 2>/dev/null || true
+          sha256sum "${RELEASE_FILES[@]}" > sha256sums
           echo "status=success" >> "$GITHUB_OUTPUT"
-          echo "archive=${ARCHIVE}" >> "$GITHUB_OUTPUT"
-
       - name: Generate release tag and notes
         id: tag
         if: env.UPLOAD_RELEASE == 'true' && steps.compile.outputs.status == 'success'
@@ -2120,8 +2142,9 @@ jobs:
           echo "dev_cn=${DEV_CN}" >> "$GITHUB_OUTPUT"
 
           # ---------- 主固件名 ----------
-          # Release 主文件是压缩包（.tar.zst / .tar.gz）；找不到就回退裸 .itb
-          MAIN_FW="$(cd "$FIRMWARE" && ls -1 *.tar.zst *.tar.gz 2>/dev/null | head -1)"
+          # 每个固件各自独立压缩成 <原名>.zst；优先刷机用的 sysupgrade
+          MAIN_FW="$(cd "$FIRMWARE" && ls -1 *squashfs-sysupgrade*.itb.zst *squashfs-sysupgrade*.itb.gz 2>/dev/null | head -1)"
+          [ -z "$MAIN_FW" ] && MAIN_FW="$(cd "$FIRMWARE" && ls -1 *.zst *.gz 2>/dev/null | head -1)"
           [ -z "$MAIN_FW" ] && MAIN_FW="$(cd "$FIRMWARE" && ls -1 *-squashfs-sysupgrade*.itb 2>/dev/null | head -1)"
           [ -z "$MAIN_FW" ] && MAIN_FW="$(cd "$FIRMWARE" && ls -1 | head -1)"
           echo "main_fw=${MAIN_FW}" >> "$GITHUB_OUTPUT"
@@ -2129,75 +2152,51 @@ jobs:
           SRC_COMMIT="$(cd "$BUILD_ROOT"/openwrt && git rev-parse --short HEAD)"
 
           # =========================================================
-          # Release 说明 —— 让下载的人一眼看清：固件叫什么、给哪台光猫、
-          # 里面编了什么、刷之前要注意什么。
+          # Release 说明（2026-11-23 精简版）
+          #   用户要求：下载页只要「路由器名字 / 插件信息 / 账户密码 IP 配置」
+          #   等信息。原来的 8 节长文、10 条刷机必读、15 项配置表、
+          #   全文件 SHA256 表、保留策略长段全部收掉。
+          #   「内置插件」由 scripts/gen-release-notes.py 从 .config 实读追加。
           # =========================================================
           {
             echo "# ${DEV_CN} · ${BUILD_TIME}"
-            echo ""
-            echo "> 本 Release 由 GitHub Actions 自动生成，tag 按编译时间命名；"
-            echo "> 「做了哪些配置 / 内置插件」两段由本次编译的最终 \`.config\` 实读生成，"
-            echo "> 不手抄、不会与固件内容对不上。"
-            echo ""
-            echo "## 一、这次发的是什么"
             echo ""
             echo "| 项目 | 内容 |"
             echo "|------|------|"
             echo "| 适用光猫 | **${DEV_CN}** |"
             echo "| 机型 profile | \`${PROFILE}\` |"
             echo "| SoC | \`${SOC}\` |"
-            echo "| 固件名称（主文件） | \`${MAIN_FW}\` |"
-            echo "| Release tag | \`${RELEASE_TAG}\` |"
+            echo "| 固件文件 | \`${MAIN_FW}\` |"
             echo "| 编译时间 | ${BUILD_TIME} |"
-            echo "| 源码 | ${REPO_URL} @ \`${REPO_BRANCH}\` |"
-            echo "| 源码提交 | \`${SRC_COMMIT}\` |"
-            echo "| Host 模式 | \`${HOST_MODE}\` |"
-            echo "| 加密加速 | ARM64CE=${OPT_CRYPTO_ARM64CE} / ChaCha=${OPT_CRYPTO_CHACHA} / EIP93=${OPT_CRYPTO_EIP93} |"
+            echo "| 源码 | ${REPO_URL} @ \`${REPO_BRANCH}\` (\`${SRC_COMMIT}\`) |"
             echo "| 内核 / 包管理 | Linux 6.18 / apk（全量签名） |"
             echo ""
-            echo "## 二、出厂默认（刷完机就是这样）"
+            echo "## 出厂默认"
             echo ""
             echo "| 项 | 值 |"
             echo "|----|----|"
             echo "| 管理地址 | \`http://192.168.1.1\` |"
             echo "| 账号 / 密码 | \`root\` / \`admin\` |"
             echo "| 时区 | Asia/Shanghai（UTC+8） |"
-            echo "| IPv6 | **关闭**（内核 + RA/DHCPv6/ULA/wan6 全关） |"
-            echo "| 内网 NTP | 本机 \`192.168.1.1:123\`，DHCP option 42 自动下发 |"
-            echo "| DNS | **PassWall 独占**：dns_shunt=chinadns-ng + dns_redirect=1，53 由 PassWall 接管；SmartDNS 已移除，系统 dnsmasq 不配上游（只留 DHCP/缓存） |"
-            echo "| 默认主题 | ARGON |"
-            echo "| 界面语言 | 简体中文 |"
+            echo "| IPv6 | 关闭 |"
+            echo "| 内网 NTP | \`192.168.1.1:123\`，DHCP option 42 下发 |"
+            echo "| DNS | PassWall 独占（chinadns-ng 分流）；SmartDNS 已移除 |"
+            echo "| 主题 / 语言 | ARGON / 简体中文 |"
             echo ""
-            echo "> 以上由 \`files/etc/uci-defaults/99-z-custom-defaults\` 在**首次开机**写入；"
-            echo "> DNS 段随后被 \`99-zz-passwall-dns\` 清空上游并交给 PassWall。"
-            echo "> 编译期另在 \`configs/*.config\` 关掉 IPv6 内核栈与 odhcp6c/odhcpd。"
-            echo "> ⚠ 跨版本 sysupgrade **不要勾「保留配置」**：旧 \`/etc/shadow\` 会盖掉 "
-            echo "> \`root/admin\`，旧 \`/etc/config/*\` 会盖掉 DNS/NTP/IPv6 设置。"
-            echo "> 完整参数与 DNS 该填什么见仓库 \`固件发布日志.md\`。"
+            echo "> 跨版本 sysupgrade **不要勾「保留配置」**，否则旧配置会盖掉以上默认。"
             echo ""
-            echo "## 三、本次固件文件"
-            echo ""
-            echo '```'
-            (cd "$FIRMWARE" && ls -1)
-            echo '```'
-            echo ""
-            echo "> **固件已压缩**：Release 附件只有一个 \`ponwrt-*-firmware.tar.zst\`（或 \`.tar.gz\`）。"
-            echo "> 裸 \`.itb\` / \`.bin\` 不传 Release，在本次 run 的 **Artifacts** 里保留，供 owut / 调试用。"
-            echo ""
-            echo "解压（任选其一）："
+            echo "## 下载与校验"
             echo ""
             echo '```bash'
-            echo "tar -I zstd -xf ponwrt-${PROFILE}-firmware.tar.zst   # .tar.zst"
-            echo "# 或：tar -xzf ponwrt-${PROFILE}-firmware.tar.gz     # 回退的 .tar.gz"
+            echo "zstd -d '${MAIN_FW}'   # 无 zstd 时：gunzip '<文件>.itb.gz'；得到 .itb"
             echo '```'
             echo ""
-            echo "解压得到的 \`*-squashfs-sysupgrade.itb\` 直接用 LuCI「系统 → 备份/升级」刷；"
-            echo "**跨版本 sysupgrade 不要勾「保留配置」**。"
+            echo "解压出的 \`*-squashfs-sysupgrade.itb\` 用 LuCI「系统 → 备份/升级」刷。"
+            echo "救砖用的 \`*-initramfs-recovery.itb\`、裸镜像与 buildinfo/profiles.json 均在本次 run 的 Artifact 里。"
             echo ""
-            echo "## 四、校验值（SHA256）"
-            echo ""
+            echo "SHA256（\`${MAIN_FW}\`）："
             echo '```'
-            (cd "$FIRMWARE" && sha256sum * 2>/dev/null | grep -vE "sha256sums|packages")
+            (cd "$FIRMWARE" && sha256sum "$MAIN_FW" 2>/dev/null)
             echo '```'
             echo ""
           } > release.txt
@@ -2224,20 +2223,14 @@ jobs:
           make_latest: true
           # 不同机型产物后缀不同，缺哪种都别让这一步失败
           fail_on_unmatched_files: false
-          # ⚠ 只传压缩包 + 元数据：裸 .itb/.bin/.ubi 80+ MB，已在 Artifact 里。
-          #   想恢复「Release 直接放裸固件」，把下面注释掉的几行加回来即可。
+          # 下载页只放「一个固件一个独立文件」+ 校验和。
+          # buildinfo / manifest / profiles.json / 裸 .itb 全留在 Artifact，
+          # 不再占下载页，也不再让人以为有一堆日志文件要下。
+          # 把 env.UPLOAD_RECOVERY 改成 'true'，两个固件会各自独立并列。
           files: |
-            ${{ env.FIRMWARE }}/*.tar.zst
-            ${{ env.FIRMWARE }}/*.tar.gz
-            ${{ env.FIRMWARE }}/*.manifest
-            ${{ env.FIRMWARE }}/*.json
+            ${{ env.FIRMWARE }}/*.zst
+            ${{ env.FIRMWARE }}/*.gz
             ${{ env.FIRMWARE }}/sha256sums
-          # ${{ env.FIRMWARE }}/*.bin
-          # ${{ env.FIRMWARE }}/*.ubi
-          # ${{ env.FIRMWARE }}/*.img
-          # ${{ env.FIRMWARE }}/*.itb
-          # ${{ env.FIRMWARE }}/*.fit
-          # ${{ env.FIRMWARE }}/*.trx
 
       - name: Append to repository release log
         # 往仓库 RELEASES.md 追加一行；push/API 写文件不触发本 workflow
@@ -2294,6 +2287,29 @@ jobs:
           token: ${{ secrets.GITHUB_TOKEN }}
           retain_days: 90
           keep_minimum_runs: 20
+
+      # ---------------------------------------------------------------
+      # 2026-11-23：用户要求「下载页不要出现缓存文件」。
+      # release_backup 已默认关闭，但历史上生成的 `cache-backup`（约 1.1 GB）
+      # 仍会一直挂在 Releases 列表；这里在成功发布后自动删一次。
+      # 失败时（success() 为假）不动，留作兜底。
+      # ---------------------------------------------------------------
+      - name: Remove legacy cache-backup release
+        continue-on-error: true
+        if: env.RELEASE_BACKUP == 'false' && success()
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          if gh release view "$CACHE_RELEASE" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            echo "删除旧 $CACHE_RELEASE Release（工具链缓存备份，~1.1 GB，不再出现在下载页）"
+            if gh release delete "$CACHE_RELEASE" --repo "$GITHUB_REPOSITORY" -y --cleanup-tag; then
+              echo "  ✅ 已删除；缓存仍由 actions/cache + cache-keepalive.yml（每 3 天真实恢复）保活"
+            else
+              echo "::warning::删除失败，可在 Releases 页面手动删除 $CACHE_RELEASE"
+            fi
+          else
+            echo "ℹ 没有 $CACHE_RELEASE，跳过"
+          fi
 
       - name: Keep latest firmware releases (prune old fw-*)
         # GitHub Release 无过期时间；为省空间只留最近 5 次固件发布。

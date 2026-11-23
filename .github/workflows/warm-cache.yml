@@ -58,9 +58,9 @@ on:
         #   两条线互不通用）。代价：source 那条首次要 1.5~2.5 小时、
         #   多占 1~2 GB 配额。只在你确实会在两种模式间切换时才选它。
       release_backup:
-        description: '同时存一份到 Release 备份（与主流程同一个 release）'
+        description: '工具链缓存是否存成 Release（默认关，下载页不出现缓存文件）'
         required: false
-        default: 'true'
+        default: 'false'
         type: choice
         options:
           - 'true'
@@ -82,7 +82,7 @@ env:
   #   matrix.host_mode 决定（一次可以同时预热 prebuilt + source 两条线）。
   #   HOST_MODE 会进缓存 key 前缀，所以矩阵里只放 ASCII 的
   #   prebuilt / source，中文选项在 prepare 里就映射掉了。
-  RELEASE_BACKUP: ${{ github.event.inputs.release_backup == 'false' && 'false' || 'true' }}
+  RELEASE_BACKUP: ${{ github.event.inputs.release_backup == 'true' && 'true' || 'false' }}
   SOURCE: ${{ github.event.inputs.source || 'pbs05/ponwrt' }}
   REPO_URL: ${{ github.event.inputs.source == 'fork' && 'https://github.com/qwe-qaq/ponwrt' || 'https://github.com/pbs05/ponwrt' }}
   REPO_BRANCH: ${{ github.event.inputs.branch || 'master' }}
