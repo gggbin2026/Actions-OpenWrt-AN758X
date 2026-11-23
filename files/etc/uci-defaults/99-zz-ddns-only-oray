@@ -1,0 +1,90 @@
+#!/bin/sh
+# ================================================================
+# 99-zz-ddns-only-oray —— DDNS 只留花生壳（2026-11-23）
+#
+# 用户要求：「DDNS 只要花生壳的这个，其他的都得剔除」。
+#
+# 编译期已经做的：
+#   · Lucky 整组移除（luci-app-lucky / lucky / 中文包 三行 is not set），
+#     diy-part1.sh 里 ADD_LUCKY=false，不再 clone sirpdboy/luci-app-lucky。
+#     它是另一个 DDNS 客户端（ddns-go 风格）+ socat 反代。
+#   · 保留 ddns-scripts（引擎）+ luci-app-ddns（界面）+ 中文包
+#     + ddns-scripts-services（provider 列表，oray.com.json 在这里面）。
+#
+# ⚠ ddns-scripts-services **不能整个删**：ddns-scripts 的 Makefile 里
+#   DEPENDS:=+ddns-scripts-services +resolveip +ip 是硬依赖，
+#   只写 is not set 会被 defconfig 自动拉回；包里 94 个 provider json
+#   也必然随包编入固件。
+#
+# 所以本脚本在**首次开机**做两件事，让最终用户视角「只有花生壳」：
+#   1) 删掉 /usr/share/ddns/default/*.json 里除 oray.com.json 外的全部
+#      （93 个）。luci-app-ddns 的 overview.js 用 fs.list() 扫这个目录
+#      生成「服务提供商」下拉，删完下拉只剩 `oray.com` + 一个 custom 项。
+#      handleCheckService 校验 service_name 时 oray.com 仍在，通过。
+#   2) 删掉 /etc/config/ddns 里除 `oray` 外的所有 config service 段。
+#      出厂 files/etc/config/ddns 本来就只有一条 disabled 的 oray 示例。
+#
+# 幂等：可重复执行；目录/配置不存在就安静跳过。
+# 代价（如实说明）：apk 的文件清单里仍列着那 93 个 json，
+#   `apk --check` 会报文件缺失（overlay whiteout），但普通使用 /
+#   LuCI / ddns 服务完全不受影响。想彻底不编入只能改 feeds Makefile。
+#
+# 排序：99-zz-ddns-only-oray → 99-zz-homebox → 99-zz-passwall-dns，
+# 三者互不写同一 UCI 字段。
+# ================================================================
+
+log() { logger -t ddns-oray "$@"; }
+
+PROVIDER_DIR="/usr/share/ddns/default"
+KEEP="oray.com.json"
+
+# ---- 1) 服务商列表只留花生壳 -------------------------------------
+if [ -d "$PROVIDER_DIR" ]; then
+  TOTAL=0
+  REMOVED=0
+  for f in "$PROVIDER_DIR"/*.json; do
+    [ -f "$f" ] || continue
+    TOTAL=$((TOTAL + 1))
+    case "$(basename "$f")" in
+      "$KEEP") ;;   # 花生壳，保留
+      *)
+        rm -f "$f" && REMOVED=$((REMOVED + 1))
+        ;;
+    esac
+  done
+  LEFT=$((TOTAL - REMOVED))
+  if [ -f "$PROVIDER_DIR/$KEEP" ]; then
+    log "DDNS 服务商已收敛：删除 $REMOVED 个非花生壳 provider，保留 oray.com.json（共 $TOTAL 个）"
+  else
+    # ★ 错误日志修复：原来这里用 echo 输出 GitHub Actions 的注解式字符串
+    #   （双冒号 warning 注解），那是 CI 语法，在**路由器首启**时只会
+    #   原样打印一条无意义的错误日志。
+    #   统一改走 logger（logread -e ddns-oray 可查），不误报 error/warning。
+    log "警告：删完但 $PROVIDER_DIR/$KEEP 不存在！ddns-scripts-services 可能没装或改了路径（剩 $LEFT 个 json）"
+  fi
+else
+  log "跳过：$PROVIDER_DIR 不存在（未装 ddns-scripts-services？）"
+fi
+
+# ---- 2) 出厂配置里只保留 oray 这一条 service ----------------------
+if [ -f /etc/config/ddns ] && command -v uci >/dev/null 2>&1; then
+  CUT=0
+  for s in $(uci -q show ddns 2>/dev/null | sed -n 's/^ddns\.\([^.=]*\)=service$/\1/p'); do
+    if [ "$s" != "oray" ]; then
+      uci -q delete "ddns.$s" && CUT=$((CUT + 1))
+    fi
+  done
+  if [ "$CUT" -gt 0 ]; then
+    uci -q commit ddns
+    log "已删除 /etc/config/ddns 里 $CUT 条非 oray 的 service 段"
+  fi
+  if ! uci -q get ddns.oray >/dev/null 2>&1; then
+    log "警告：/etc/config/ddns 里没有 oray 段，LuCI 里需手动添加（service_name='oray.com'）"
+  else
+    log "保留 ddns.oray：service_name=$(uci -q get ddns.oray.service_name 2>/dev/null), enabled=$(uci -q get ddns.oray.enabled 2>/dev/null)"
+  fi
+fi
+
+rm -f /tmp/luci-indexcache
+rm -rf /tmp/luci-modulecache
+exit 0

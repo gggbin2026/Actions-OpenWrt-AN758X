@@ -2,7 +2,7 @@
 # ================================================================
 # diy-part1.sh —— 只做一件事：拉取可选插件到 package/custom
 # 2026-11-22 修复：PON 界面用 luci-app-onu（每次全新 clone naoki66 仓库 main 最新提交）；
-#                  qwe-qaq/luci-app 补拷 luci-app-igmpproxy，满足 workflow 的状态插件校验。
+#                  qwe-qaq/luci-app 补拷 luci-app-igmpproxy（用户要求组播双代理保留）。
 # 运行目录: ponwrt 源码根目录（feeds 安装之后、加载 .config 之前）
 #
 # 用法：把需要的插件开关改成 true，再到 configs/<机型>.config 里
@@ -29,6 +29,11 @@ mkdir -p "$PKG_DIR"
 #   前端，本体一律用 feeds 的。
 #
 #   nft-qos / luci-app-nft-qos / ddns-scripts / luci-app-ddns 四项完全走官方
+#   ★ 2026-11-23：DDNS 只留花生壳，Lucky 整组移除（ADD_LUCKY=false）
+#   ★ 2026-11-23 插件去重：测速只留 FastNet（Homebox 移除）；
+#     5 个「白开且重复」的 ADD_* 开关置 false，避免白 clone。
+#   ★ 用户复核：组播代理 omcproxy + igmpproxy **两个都保留**，
+#     monorepo 拷包列表恢复为 3 个；IGMP Snooping 由首启脚本开启。
 #   feeds（packages + luci），本脚本不 clone，只在 configs/<机型>.config 里写 =y；
 #   若 defconfig 报「dependency ... does not exist」，说明该 feed 不带这个包，
 #   看 Validate configuration 的 warning，不要在这里补第三方源。
@@ -41,41 +46,52 @@ mkdir -p "$PKG_DIR"
 #   rpcd-mod-ucode / ucode-mod-* 全在底座主仓库，不需要额外 feed。
 ADD_AIROHA_NPU=true    # luci-app-airoha-npu：Airoha SoC 状态页（NPU/CPU/Frame Engine/PPE）
 # ---------------------------------------------------------
-# ★ naoki66/luci-app-airoha —— Airoha/Gemtek 专用 LuCI feed（7 个包的合集）
-#   ⚠ 这是「feed 仓库名」，不是单个插件。用 package/custom 方式接入，与 ONU /
-#     iStore 同构（feed install 方式在这套 CI 上出过 Kconfig 符号丢失的坑）。
-#   下面这些开关都能被环境变量覆盖（: ${VAR:=默认}），想改不用动脚本。
+# naoki66/luci-app-airoha —— ★ 本版已移除（2026-11-23，用户「只要 ONU 就行」）
+#
+#   这是「feed 仓库名」，不是单个插件：里面 7 个 LuCI 包，上一版默认装了
+#   4 个（factory / recovery / clients / netmode）。现在整组不要了：
+#     · 不再 clone，package/custom 里不出现这 4 个包
+#     · 两份 configs/*.config 里对应的 4 个 app + 4 个中文包全改 is not set
+#     · workflow 的 Airoha feed 核对改成条件式，不会因缺包报警
+#   光猫管理只保留 naoki66/OpenWrt_ONU_CONFIG 的 luci-app-onu 全套。
+#
+#   ⚠ 下面这行 ADD_AIROHA_NPU=true 是**另一个包**（luanmuc 的 NPU/CPU/PPE
+#   状态页），不属于这个 feed，本版保留；连它也不要的话见文件末尾说明。
+#   想恢复 feed：把下面 5 行改回 true，并把两份 config 的 8 行 =y 补回来。
 # ---------------------------------------------------------
-ADD_AIROHA_FEED=true          # 总开关：clone naoki66/luci-app-airoha 并挑包装进 package/custom
-: "${AIROHA_FEED_BRANCH:=main}"   # 不锁 commit/tag，每次拉 main 当前 HEAD
-: "${ADD_AIROHA_FACTORY:=true}"   # luci-app-airoha-factory：工厂身份/校准数据编辑器
-: "${ADD_AIROHA_RECOVERY:=true}"  # luci-app-airoha-recovery：U-Boot HTTP 恢复控制
-: "${ADD_AIROHA_CLIENTS:=true}"   # luci-app-clients：终端列表（地址来源/每设备流量/DNS）
-: "${ADD_AIROHA_NETMODE:=true}"   # luci-app-netmode：网络模式 AP / DHCP / PPPoE
-: "${ADD_AIROHA_FANCONTROL:=false}" # 风扇控制：这两台机器无此硬件，默认关
-: "${ADD_AIROHA_MESH:=false}"     # Mesh 配置：依赖 wpad-mesh-mbedtls/dawn/socat 一大串，默认关
-: "${ADD_AIROHA_NPU_V2:=false}"   # ⚠ 与上面 luanmuc 的 luci-app-airoha-npu 同名，默认关（开了会冲突）
+ADD_AIROHA_FEED=false
+AIROHA_FEED_BRANCH=main
+ADD_AIROHA_FACTORY=false
+ADD_AIROHA_RECOVERY=false
+ADD_AIROHA_CLIENTS=false
+ADD_AIROHA_NETMODE=false
+ADD_AIROHA_FANCONTROL=false
+ADD_AIROHA_MESH=false
+ADD_AIROHA_NPU_V2=false
 AIROHA_PKGS=""
-ADD_FLUENT=true        # luci-theme-fluent：Fluent 2 风格主题
+ADD_FLUENT=false       # ★ 去重：第三个主题（argon/bootstrap 已够），config 无 =y，白 clone
 ADD_FLUENT_LITE=false  # luci-theme-fluent-lite：轻量版（与 fluent 互斥，二选一）
 ADD_FLUENT_DASH=false  # luci-mod-fluentdashboard：可选状态概览卡片
 ADD_PASSWALL=true      # luci-app-passwall（只用 feeds 的依赖包）
-ADD_OPENCLASH=true     # luci-app-openclash ⚠ 依赖 Ruby/Rust，编译极慢
-ADD_MOSDNS=true        # luci-app-mosdns（本体只用 feeds 的 mosdns）
-ADD_LUCKY=true         # ★ luci-app-lucky + lucky 本体（DDNS + socat；与官方 luci-app-ddns 功能重叠，见固件说明.md）
+ADD_OPENCLASH=false    # ★ 去重：与 PassWall 同为代理客户端，config 无 =y（白 clone + Ruby 极慢）
+ADD_MOSDNS=false       # ★ 去重：DNS 已由 PassWall/chinadns-ng 独占，config 无 =y
+ADD_LUCKY=false        # ★ 已移除（2026-11-23「DDNS 只要花生壳」）：Lucky 是另一个 DDNS 客户端
+# 「只留花生壳」的实际逻辑在 files/etc/uci-defaults/99-zz-ddns-only-oray（首启执行），
+# 不在本脚本：diy 只负责不 clone Lucky，运行期由 uci-defaults 收敛服务商列表。
 ADD_TTYD=true          # ★ ttyd + luci-app-ttyd（网页终端，官方 feeds 自带，无需 clone，只写 config）
 ADD_ACCESSCONTROL=true # ★ 上网时间控制：用 luci-app-accesscontrol-plus（fw4/nftables 兼容版）
 ADD_ACCESSCONTROL_LEGACY=false # 原版 luci-app-accesscontrol：fw3/iptables 时代老包，这套 fw4 固件装了也不生效，默认关
-ADD_TAILSCALE=true     # luci-app-tailscale（本体只用 feeds 的 tailscale）
+ADD_TAILSCALE=false    # ★ 去重：与 EasyTier 同为异地组网，两者 config 都无 =y → 都关
 ADD_OPENLIST=true      # luci-app-openlist2（alist/openlist 挂载）
-ADD_SMARTDNS=true      # luci-app-smartdns（本体只用 feeds 的 smartdns）
+ADD_SMARTDNS=false     # ★ 已移除（2026-11-23「剔除系统 dns 只要 passwall」）：DNS 全交 PassWall
+ADD_RTP2HTTPD=true     # ★ rtp2httpd v3.17.2 + luci-app-rtp2httpd（RTP/UDP/RTSP → HTTP，FCC 快速换台）
 ADD_FASTNET=true       # ★ luci-app-fastnet + fastnet（LinEase/iStoreOS 生态，网络测速与链路质量）
                        #   依赖 linkease-app-entry / luci-lib-linkeaseauth，见下方 fastnet 段
 ADD_DDNS=true          # ★ ddns-scripts + luci-app-ddns（官方 feeds 自带，无需 clone，只写 config）
 ADD_NFT_QOS=true       # ★ nft-qos + luci-app-nft-qos（官方 packages/luci feeds 自带，无需 clone，只写 config）
-ADD_HOMEBOX=true       # ★ homebox + luci-app-homebox：浏览器内网测速（:3300），预编译二进制、不拖 Go/npm
+ADD_HOMEBOX=false      # ★ 去重：与 FastNet 同属测速工具，只留 FastNet（用户明确点名要）
 ADD_VANTAGE=true       # ★ luci-app-vantage：实时网络仪表盘【一般插件，不是主题】+ 自带简体中文 po
-ADD_EASYTIER=true      # luci-app-easytier（另需 kmod-tun + easytier 本体，Rust 编译较慢）
+ADD_EASYTIER=false     # ★ 去重：与 Tailscale 同为异地组网，两者 config 都无 =y → 都关（省 Rust 编译）
 ADD_POWEROFF=true      # luci-app-poweroffdevice（关机）
 ADD_OWQ_WOL=true       # luci-app-owq-wol（网络唤醒，依赖 etherwake）
 ADD_WATCHDOG=true      # luci-app-watchdog（看门狗，包在子目录，需特殊处理）
@@ -136,7 +152,10 @@ clone() {  # clone <url> <dir> [branch]
 #   luci-app/
 #   ├── luci-app-natmode/
 #   ├── luci-app-pon-status/
-#   └── luci-app-igmpproxy/   ← 机型 config 里 =y，缺它会被 defconfig 静默剔除
+#   └── luci-app-igmpproxy/   ← ★ 2026-11-23 用户复核：组播双代理都保留，恢复拷入
+#
+# ⚠ 三个都拷：igmpproxy 是用户明确要保留的 IPv4 组播代理，
+#   缺了它 config 里的 =y 会被 defconfig 静默剔除，LuCI 少一张配置页。
 # =========================================================
 if [ "$ADD_LUCI_APP" = "true" ]; then
   LUCI_APP_URL="https://github.com/qwe-qaq/luci-app"
@@ -222,10 +241,13 @@ if [ "$ADD_ONU" = "true" ]; then
 fi
 
 # =========================================================
-# ★ naoki66/luci-app-airoha —— Airoha/Gemtek 专用 LuCI feed
+# naoki66/luci-app-airoha —— Airoha/Gemtek 专用 LuCI feed【本版已移除】
 #
-# 7 个包：npu / factory / recovery / fancontrol / netmode / mesh-conf / clients。
-# 只把开关打开的包拷进 package/custom/，不用的不进索引，避免拖依赖。
+# 2026-11-23 用户要求「luci-app-airoha 也不要了，只要 ONU 就行」：
+#   ADD_AIROHA_FEED=false，整段不执行，不 clone、不拷包、po 改名也不跑。
+#   保留代码只是留个可逆的开关，将来想恢复改上面 5 行 + 两份 config 即可。
+# 原说明：7 个包（npu / factory / recovery / fancontrol / netmode / mesh-conf /
+# clients），只把开关打开的包拷进 package/custom/，不用的不进索引。
 #
 # ⚠ po 改名：luci.mk 第 9 行
 #     LUCI_BASENAME ?= $(patsubst luci-$(LUCI_TYPE)-%,%,$(LUCI_NAME))
@@ -515,6 +537,9 @@ fi
 # 前端 LUCI_DEPENDS:=+lucky，两个目录都要拷，否则索引报「依赖 watchdog/lucky 不存在」。
 # 自带 po/zh_Hans/lucky.po → luci.mk 生成 luci-i18n-lucky-zh-cn。
 if [ "$ADD_LUCKY" = "true" ]; then
+  echo "::warning::ADD_LUCKY 又被打开了 —— 本版「DDNS 只留花生壳」，"
+  echo "        configs/*.config 里 lucky 三行仍是 is not set，=y 不会生效；"
+  echo "        确认要恢复 Lucky 需同时改 config 三行 + 关闭 99-zz-ddns-only-oray"
   LK_TMP="$(mktemp -d)/lucky"
   if clone https://github.com/sirpdboy/luci-app-lucky "$LK_TMP" main; then
     for p in lucky luci-app-lucky; do
@@ -538,6 +563,10 @@ if [ "$ADD_OPENLIST" = "true" ]; then
   clone https://github.com/sbwml/luci-app-openlist2 "$PKG_DIR/luci-app-openlist2" main
 fi
 
+# --- homebox（已停用：插件去重只留 FastNet）-----------------------------
+# ★ 2026-11-23：下面这段保留但 ADD_HOMEBOX=false，不会执行。
+#   保留源码便于三处回退（config 三行 =y + ADD_HOMEBOX=true + 恢复 files 三件套）。
+# ------------------------------------------------------------------------
 # --- homebox（浏览器内网测速 http://<路由IP>:3300）-----------------------
 # 两个包来自两个仓库，都只拷需要的子目录，避免和 feeds 里同名包冲突：
 #   sirpdboy/netspeedtest/homebox/Makefile  -> homebox 本体（预编译 musl 二进制）
@@ -616,10 +645,111 @@ if [ "$ADD_VANTAGE" = "true" ]; then
   fi
 fi
 
-# --- smartdns ---
-# ⚠ 不拉 pymumu/smartdns 本体：与 feeds/packages/net/smartdns 同名。
+# --- SmartDNS【本版已移除】-------------------------------------------
+# 2026-11-23 用户要求「剔除系统的 dns，只要 passwall」：
+#   · configs/*.config 里 smartdns / luci-app-smartdns / 中文包 3 行全改 is not set
+#   · files/etc/config/smartdns 与 99-zz-smartdns 已从修复包删除
+#   · DNS 由 PassWall 独占（dns_shunt=chinadns-ng + dns_redirect=1），
+#     出厂配置由 files/etc/uci-defaults/99-zz-passwall-dns 写入
+#   ⚠ dnsmasq-full 保留：LAN DHCP 靠它，PassWall LUCI_DEPENDS 也硬依赖。
+#   下面整段不执行（ADD_SMARTDNS=false），保留代码只是留个可逆开关。
 if [ "$ADD_SMARTDNS" = "true" ]; then
-  clone https://github.com/pymumu/luci-app-smartdns "$PKG_DIR/luci-app-smartdns" master
+  echo "::warning::ADD_SMARTDNS 又被打开了 —— config 里 3 行仍是 is not set，=y 不会生效；"
+  echo "        确认要恢复 SmartDNS 需同时改 configs/*.config 与 files/"
+  rm -rf "package/feeds/luci/luci-app-smartdns" "package/feeds/custom/luci-app-smartdns"
+  if ! clone https://github.com/pymumu/luci-app-smartdns "$PKG_DIR/luci-app-smartdns" master; then
+    echo "::error::luci-app-smartdns 拉取失败"
+    exit 1
+  fi
+fi
+
+# --- rtp2httpd v3.17.2（RTP/UDP/RTSP → HTTP，FCC 快速换台）----------------
+# 上游 stackia/rtp2httpd，OpenWrt 集成包在仓库的 openwrt-support/ 下，两个包：
+#   openwrt-support/rtp2httpd/          本体（cmake，源码从 GitHub Release 下载）
+#   openwrt-support/luci-app-rtp2httpd/ LuCI 界面 + po/zh_Hans/rtp2httpd.po
+#
+# ⚠ 必须用 Makefile.versioned 覆盖 Makefile（官方「固件维护者集成指南」）：
+#   它固定了 RELEASE_VERSION + PKG_HASH，构建时从
+#   https://codeload.github.com/stackia/rtp2httpd/tar.gz/v<版本> 下载源码包，
+#   Web UI 已预构建进 tarball —— 不需要 Node / pnpm / corepack，
+#   也不需要本地 git 历史。直接用原始 Makefile 会走 PKG_SOURCE_PROTO=git
+#   并在编译期联网，350 分钟的 job 里最容易挂。
+#
+# ⚠ 每次 clone main 当前 HEAD，Makefile.versioned 里的版本随上游 Release
+#   自动更新（当前 v3.17.2, 2026-10-02），所以「编译最新」是自动的。
+#   想锁版本：把 R2_BRANCH 改成 v3.17.2 之类的 tag。
+# ------------------------------------------------------------------------
+if [ "$ADD_RTP2HTTPD" = "true" ]; then
+  # ------------------------------------------------------------------
+  # ★★ 2026-11-23 冲突修复：feeds 里本来就有同名包 ★★
+  #   immortalwrt/packages/net/rtp2httpd          → PKG_VERSION 3.16.0
+  #   immortalwrt/luci/applications/luci-app-rtp2httpd → 自带 po/zh_Hans
+  #   它们经 ./scripts/feeds install -a 后会在 package/feeds/{packages,luci}/
+  #   生成符号链接。我们再把上游 openwrt-support/ 拷进 package/custom/，
+  #   索引里就是**两份同名 Package**：
+  #     · package-metadata 按扫描顺序挑一个 → 可能编出 3.16.0 而不是 3.17.2
+  #     · luci-i18n-rtp2httpd-zh-cn 会由两份 po 各生成一次
+  #     · LuCI 菜单 / rpcd ACL 重复注册
+  #   这正是本文件开头「同名包不能两份同时进索引」警告的情形。
+  #   所以拷包前必须把 feeds 的源码目录 + package/feeds 符号链接一起删掉。
+  #   （diy-part1.sh 在 feeds update/install 之后执行，删掉不会被重建。）
+  # ------------------------------------------------------------------
+  for d in feeds/packages/net/rtp2httpd \
+           feeds/luci/applications/luci-app-rtp2httpd \
+           package/feeds/packages/rtp2httpd \
+           package/feeds/luci/luci-app-rtp2httpd \
+           package/feeds/custom/rtp2httpd \
+           package/feeds/custom/luci-app-rtp2httpd; do
+    if [ -e "$d" ] || [ -L "$d" ]; then
+      rm -rf "$d"
+      echo "ℹ 移除 feeds 同名包: $d"
+    fi
+  done
+
+  : "${R2_BRANCH:=main}"
+  R2_TMP="$(mktemp -d)/rtp2httpd"
+  if ! clone https://github.com/stackia/rtp2httpd "$R2_TMP" "$R2_BRANCH"; then
+    echo "::error::stackia/rtp2httpd 拉取失败，config 里的 rtp2httpd=y 会被 defconfig 剔除"
+    exit 1
+  fi
+  echo "ℹ rtp2httpd 源: stackia/rtp2httpd @ ${R2_BRANCH}"
+  echo "ℹ rtp2httpd 提交: $(git -C "$R2_TMP" rev-parse --short HEAD) · $(git -C "$R2_TMP" log -1 --format='%ci %s')"
+
+  for p in rtp2httpd luci-app-rtp2httpd; do
+    SRC="$R2_TMP/openwrt-support/$p"
+    if [ ! -f "$SRC/Makefile" ]; then
+      echo "::error::openwrt-support/$p/Makefile 不存在（上游改结构了？）"
+      exit 1
+    fi
+    if [ ! -f "$SRC/Makefile.versioned" ]; then
+      echo "::error::openwrt-support/$p/Makefile.versioned 不存在，无法固定版本与 PKG_HASH"
+      exit 1
+    fi
+    rm -rf "$PKG_DIR/$p" "package/feeds/custom/$p"
+    cp -a "$SRC" "$PKG_DIR/$p"
+    mv -f "$PKG_DIR/$p/Makefile.versioned" "$PKG_DIR/$p/Makefile"
+    R2_VER="$(grep -m1 '^RELEASE_VERSION:=' "$PKG_DIR/$p/Makefile" | sed 's/.*:=//')"
+    echo "✅ 已拷入: package/custom/$p (RELEASE_VERSION=${R2_VER:-?}, Makefile.versioned → Makefile)"
+  done
+  # 中文包由 luci.mk 按 po/zh_Hans/rtp2httpd.po 生成 luci-i18n-rtp2httpd-zh-cn
+  [ -f "$PKG_DIR/luci-app-rtp2httpd/po/zh_Hans/rtp2httpd.po" ] \
+    || echo "::warning::缺 po/zh_Hans/rtp2httpd.po，中文包可能不生成"
+  rm -rf "$R2_TMP"
+
+  # 自检：确认全树只剩我们拷的这一份，且版本是上游最新
+  DUP=""
+  for d in feeds/packages/net/rtp2httpd \
+           feeds/luci/applications/luci-app-rtp2httpd \
+           package/feeds/packages/rtp2httpd \
+           package/feeds/luci/luci-app-rtp2httpd; do
+    if [ -e "$d" ] || [ -L "$d" ]; then DUP="$DUP $d"; fi
+  done
+  if [ -n "$DUP" ]; then
+    echo "::error::rtp2httpd 同名包仍存在（会双份进索引）:$DUP"
+    exit 1
+  fi
+  R2_VER="$(grep -m1 '^RELEASE_VERSION:=' "$PKG_DIR/rtp2httpd/Makefile" | sed 's/.*:=//')"
+  echo "✅ rtp2httpd 索引唯一：package/custom/{rtp2httpd,luci-app-rtp2httpd} @ v${R2_VER:-?}（feeds 同名包已清）"
 fi
 
 # --- fastnet（LinEase / iStoreOS 生态）---------------------------------
@@ -955,7 +1085,8 @@ if [ -n "$(ls -A "$PKG_DIR" 2>/dev/null)" ]; then
   REQUIRED=""
   [ "$ADD_AIROHA_NPU" = "true" ] && REQUIRED="$REQUIRED luci-app-airoha-npu"
   if [ "$ADD_LUCI_APP" = "true" ]; then
-    REQUIRED="$REQUIRED luci-app-natmode luci-app-pon-status"
+    # 用户复核：组播双代理都保留，igmpproxy 一并校验索引（拷包失败要在这里报出来）
+    REQUIRED="$REQUIRED luci-app-natmode luci-app-pon-status luci-app-igmpproxy"
   fi
   [ "$ADD_ONU" = "true" ] && REQUIRED="$REQUIRED luci-app-onu"
   # naoki66/luci-app-airoha feed：只校验有实体目录的包本体；中文包由 luci.mk 按 po 动态生成
@@ -970,21 +1101,22 @@ if [ -n "$(ls -A "$PKG_DIR" 2>/dev/null)" ]; then
   [ "$ADD_OPENCLASH" = "true" ] && REQUIRED="$REQUIRED luci-app-openclash"
   [ "$ADD_PASSWALL"  = "true" ] && REQUIRED="$REQUIRED luci-app-passwall"
   [ "$ADD_MOSDNS"    = "true" ] && REQUIRED="$REQUIRED luci-app-mosdns"
-  [ "$ADD_LUCKY"     = "true" ] && REQUIRED="$REQUIRED luci-app-lucky"
+  # ADD_LUCKY 已置 false；DDNS 只留花生壳，无对应实体包需要校验
   [ "$ADD_TAILSCALE" = "true" ] && REQUIRED="$REQUIRED luci-app-tailscale"
   [ "$ADD_OPENLIST"  = "true" ] && REQUIRED="$REQUIRED luci-app-openlist2"
-  [ "$ADD_SMARTDNS"  = "true" ] && REQUIRED="$REQUIRED luci-app-smartdns"
+  # ADD_SMARTDNS 已置 false；DNS 改由 PassWall 独占，无对应实体包需要校验
   # 定制增强：fastnet 四个包必须都进索引，否则 defconfig 会静默剔除 =y
   [ "$ADD_FASTNET"   = "true" ] && REQUIRED="$REQUIRED fastnet luci-app-fastnet linkease-app-entry luci-lib-linkeaseauth"
-  # 定制增强：homebox 两包必须都进索引，否则 defconfig 会静默剔除 =y
-  [ "$ADD_HOMEBOX"   = "true" ] && REQUIRED="$REQUIRED homebox luci-app-homebox"
+  # ★ 插件去重：Homebox / OpenClash / MosDNS / Tailscale / EasyTier / Fluent
+  #   均已 ADD_*=false 且 config 无 =y，下面这些条件式校验自然跳过。
+  #   保留条件式是为了「三处一起改回」时能自动恢复，不用再补一行。
   # 定制增强：只校验 app 本体；中文包 luci-i18n-vantage-zh-cn 由 luci.mk 按 po 动态生成，
   # 不在 package 目录里以独立目录出现，放进这里会误报「未进索引」。
   [ "$ADD_VANTAGE"   = "true" ] && REQUIRED="$REQUIRED luci-app-vantage"
   # 本轮 6 个新插件：只校验「有实体目录」的包本体；中文包由 luci.mk 动态生成，
   # 放进来会误报「未进索引」。kmod-oaf / snmpd-nossl / bash / ttyd 是 feed 自带，
   # 也不进 REQUIRED（靠 config 的 =y + workflow 自检兜底）。
-  [ "$ADD_LUCKY"          = "true" ] && REQUIRED="$REQUIRED luci-app-lucky lucky"
+  # （同上）Lucky 整组移除
   [ "$ADD_WATCHDOG"       = "true" ] && REQUIRED="$REQUIRED luci-app-watchdog watchdog"
   [ "$ADD_TASKPLAN"       = "true" ] && REQUIRED="$REQUIRED luci-app-taskplan"
   # OAF 已按用户要求移除：整组不 clone、不进 REQUIRED、不写 config

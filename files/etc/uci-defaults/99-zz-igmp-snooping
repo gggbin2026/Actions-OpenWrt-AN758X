@@ -1,0 +1,85 @@
+#!/bin/sh
+# ================================================================
+# 99-zz-igmp-snooping —— 开启 IGMP Snooping（2026-11-23）
+#
+# 用户要求：「igmp snooping 也要」「组播代理也要保留」。
+#
+# 背景（查证）：
+#   · OpenWrt Wiki「Network configuration」：igmp_snooping 是 **bridge 选项**
+#     （`config device` 段，21.02+；旧式写法是 `config interface lan` 里
+#      `option igmp_snooping 1`），只把组播发给真正订阅的端口，
+#     避免 IPTV 组播把 LAN/Wi-Fi 全部泛洪。
+#   · netifd commit 52541140 把默认的 `cfg->igmp_snoop = true` 删掉了 ——
+#     **新版默认关闭**，必须显式写 1。
+#   · 内核 CONFIG_BRIDGE_IGMP_SNOOPING 自 r41366 起在 generic config 里
+#     重新启用，但它是**内核符号**，写顶层 .config 会被
+#     target/linux/airoha/an7581/config-<kver> 覆盖（同 README 里
+#     CONFIG_CRYPTO_* 的坑）。所以本脚本不碰 .config，只写 UCI + sysfs。
+#
+# 本脚本做两件事，幂等、可重复执行、任何一步失败都不阻断开机：
+#   1) 找到所有 type=bridge 的 config device 段（兼容旧式
+#      `config interface lan` + `option type bridge`），写
+#      igmp_snooping=1；commit network，等 network reload 生效。
+#   2) 若 br-lan 已存在（网络已起），直接写 sysfs
+#      /sys/class/net/br-lan/bridge/multicast_snooping = 1 立即生效。
+#
+# ⚠ 日志口径（用户要求「错误的日志也修复」）：
+#   · 首启时 br-lan 常常还没创建，sysfs 不存在是**正常**的，
+#     只打 logger 提示，不打 ::warning:: / ::error::（那是 GitHub Actions
+#     注解语法，在路由器上原样输出就是一条无意义的错误日志）。
+#   · 全部用 logger -t igmp-snoop，logread -e igmp-snoop 可查。
+#
+# 组播双代理（omcproxy + igmpproxy）都在固件里，但**别同时在同一上行
+# 接口启用**，会争抢组播加入 / 重复转发。建议 IPv4 IPTV 用 igmpproxy，
+# ONU 菜单自带组播路径用 omcproxy；rtp2httpd:5140 只转流不订阅。
+# ================================================================
+
+log() { logger -t igmp-snoop "$@"; }
+
+# ---- 1) UCI：找 bridge 段 ---------------------------------------
+BRSEC=""
+for s in $(uci -q show network 2>/dev/null \
+           | sed -n 's/^network\.\([^.=]*\)=device$/\1/p'); do
+  if [ "$(uci -q get "network.$s.type" 2>/dev/null)" = "bridge" ]; then
+    BRSEC="$BRSEC $s"
+  fi
+done
+
+# 旧式写法兜底：config interface 'lan' 带 option type 'bridge'
+if [ -z "$BRSEC" ] && [ "$(uci -q get network.lan.type 2>/dev/null)" = "bridge" ]; then
+  BRSEC="lan"
+fi
+
+if [ -n "$BRSEC" ]; then
+  for s in $BRSEC; do
+    uci -q set "network.$s.igmp_snooping=1"
+  done
+  uci -q commit network
+  log "IGMP Snooping 已写入 UCI: 段[$BRSEC] igmp_snooping=1（network reload 后生效）"
+else
+  log "提示：/etc/config/network 里没找到 type=bridge 的段（单网口/非桥接机型？），UCI 未改；组播代理仍可用"
+fi
+
+# ---- 2) sysfs：网络已起时立即生效 --------------------------------
+SYSFS=""
+for p in /sys/class/net/br-lan/bridge/multicast_snooping \
+         /sys/devices/virtual/net/br-lan/bridge/multicast_snooping; do
+  if [ -w "$p" ]; then SYSFS="$p"; break; fi
+done
+
+if [ -n "$SYSFS" ]; then
+  if echo 1 > "$SYSFS" 2>/dev/null; then
+    log "IGMP Snooping sysfs 已置 1: $SYSFS = $(cat "$SYSFS" 2>/dev/null)"
+  else
+    log "提示：写 $SYSFS 失败（只读？），UCI 设置仍在，重载网络后生效"
+  fi
+else
+  # 首启阶段 br-lan 尚未创建属正常，不报 error/warning
+  log "提示：未找到 bridge multicast_snooping sysfs（首启时 br-lan 尚未创建，或内核未编 CONFIG_BRIDGE_IGMP_SNOOPING）；不视为错误"
+fi
+
+# ---- 3) 清 LuCI 缓存，让「网络 → 接口」里显示新值 ----------------
+rm -f /tmp/luci-indexcache
+rm -rf /tmp/luci-modulecache
+
+exit 0

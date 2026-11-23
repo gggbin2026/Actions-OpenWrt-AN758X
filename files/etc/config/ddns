@@ -1,0 +1,33 @@
+# 动态 DNS 出厂配置（PonWrt AN758x）
+#
+# 本文件覆盖 ddns-scripts 自带的默认配置。默认只保留一个**禁用**的
+# 花生壳（oray.com）示例，避免开机就往日志里刷「账号错误」。
+#
+# 用起来：LuCI「服务 → 动态 DNS」找到 oray，或 SSH 直接改下面几行：
+#   option username   '你的 Oray 账号'
+#   option password   '花生壳管理密码'
+#   option lookup_host 'xxx.oray.net'   ← 贝锐给的免费域名
+#   option domain     'xxx.oray.net'
+#   再把 option enabled 改成 '1'，然后 /etc/init.d/ddns restart
+#
+# ⚠ service_name 必须是 'oray.com'（不是 'oray'），它对应
+#   /usr/share/ddns/default/oray.com.json，由 ddns-scripts-services 提供。
+#   固件 IPv6 已关闭，所以这里不写 myddns_ipv6 段。
+config ddns 'global'
+	option ddns_dateformat '%F %R'
+	option ddns_loglines '250'
+	option upd_privateip '0'
+
+config service 'oray'
+	option enabled '0'
+	option service_name 'oray.com'
+	option lookup_host 'yourdomain.oray.net'
+	option domain 'yourdomain.oray.net'
+	option username 'YOUR_ORAY_ACCOUNT'
+	option password 'YOUR_ORAY_PASSWORD'
+	option interface 'wan'
+	option ip_source 'network'
+	option ip_network 'wan'
+	option use_api_check '0'
+	option check_interval '10'
+	option check_unit 'minutes'

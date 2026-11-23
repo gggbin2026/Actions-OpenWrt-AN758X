@@ -100,6 +100,10 @@ if [ "$WARN_TOTAL" -gt 0 ]; then
 
   REAL=0
   REAL_LIST=""
+  # 用临时文件而不是 < <(...)：workflow 里是 bash 调，但 sh 也能过语法检查，
+  # 且 while 不在管道里，REAL / REAL_LIST 能带回当前 shell。
+  WARN_FILE="$(mktemp)"
+  grep '^WARNING:' "$LOG" > "$WARN_FILE" 2>/dev/null || true
   while IFS= read -r _wline; do
     [ -n "$_wline" ] || continue
     _dep="$(printf '%s' "$_wline" | sed -E "s/.*dependency on '([^']+)', which does not exist.*/\1/")"
@@ -109,7 +113,8 @@ if [ "$WARN_TOTAL" -gt 0 ]; then
       REAL=$((REAL + 1))
       REAL_LIST="$REAL_LIST $_dep"
     fi
-  done < <(grep '^WARNING:' "$LOG" 2>/dev/null || true)
+  done < "$WARN_FILE"
+  rm -f "$WARN_FILE"
 
   echo "------------------------------------------"
   if [ "$REAL" -gt 0 ]; then

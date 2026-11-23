@@ -1,0 +1,93 @@
+#!/bin/sh
+# ================================================================
+# 99-zz-passwall-dns —— DNS 全交 PassWall，剔除系统自带 DNS 配置
+#
+# 2026-11-23 用户要求「把系统的 dns 剔除，只要 passwall」。本版：
+#   · SmartDNS 整组（本体 / LuCI / 中文包）已从 configs/*.config 移除，
+#     files/etc/config/smartdns 与 99-zz-smartdns 也已删除。
+#   · dnsmasq-full **保留但不再配任何上游**：LAN 的 DHCP 靠它，
+#     PassWall 的 LUCI_DEPENDS 也硬写了 +dnsmasq-full（会 copy 出第二个实例）。
+#   · DNS 由 PassWall 独占：dns_shunt=chinadns-ng + dns_redirect=1，
+#     53 由 PassWall 的 dnsmasq 实例接管，chinadns-ng 做国内/国外智能分流。
+#     chinadns-ng 由 PassWall 的 LUCI_DEPENDS 自动拉入，
+#     configs/*.config 里另显式写了 CONFIG_PACKAGE_chinadns-ng=y 兜底。
+#
+# 链路：LAN → PassWall dnsmasq(53) → chinadns-ng → 国内直连 / 国外远端
+#       未启用 PassWall 时：系统 dnsmasq 回落 WAN 下发的 DNS（不会断网）。
+#
+# 排序：99-z-custom-defaults（写三条上游 + noresolv）→ 99-zz-homebox →
+#       本文件（最后清空上游、写 PassWall，保证最终状态不被覆盖）。
+# 幂等：可重复执行；没装 PassWall 就安静跳过，不创建残缺配置。
+# ================================================================
+
+log() { logger -t passwall-dns "$@"; }
+
+# ---- 1) 剔除系统自带 DNS 配置 -------------------------------------
+# 99-z-custom-defaults 会写「三条国内上游 + noresolv=1 + cachesize=10000」；
+# 上一版的 99-zz-smartdns 还会写 strictorder / 6053。这里全部清掉，
+# 只保留缓存与重绑定保护设置，让 dnsmasq 回到「无自定义上游」状态。
+if uci -q get dhcp.@dnsmasq[0] >/dev/null 2>&1; then
+  uci -q delete dhcp.@dnsmasq[0].server
+  uci -q delete dhcp.@dnsmasq[0].strictorder
+  uci -q delete dhcp.@dnsmasq[0].noresolv
+  uci -q delete dhcp.@dnsmasq[0].allservers
+  uci -q delete dhcp.@dnsmasq[0].resolvfile
+  uci -q set dhcp.@dnsmasq[0].cachesize='10000'
+  uci -q set dhcp.@dnsmasq[0].dnsforwardmax='1000'
+  uci -q set dhcp.@dnsmasq[0].rebind_protection='0'
+  uci -q commit dhcp
+  log "系统 DNS 上游配置已剔除（dnsmasq 只留 DHCP/缓存，不解析上游）"
+else
+  log "警告：dhcp.@dnsmasq[0] 不存在，跳过上游清理"
+fi
+
+# ---- 2) 没装 PassWall 就到此为止 ----------------------------------
+if [ ! -x /etc/init.d/passwall ]; then
+  log "未安装 PassWall，跳过 DNS 接管设置"
+  exit 0
+fi
+
+# 包把 /etc/config/passwall 声明为 conffile，正常会自带一份。缺了就从
+# 上游完整默认配置复制，而不是只写几个字段（避免缺 nodes/myshunt 等段）。
+if [ ! -f /etc/config/passwall ] && [ -f /usr/share/passwall/0_default_config ]; then
+  mkdir -p /etc/config
+  cp /usr/share/passwall/0_default_config /etc/config/passwall
+  log "/etc/config/passwall 不存在，已从 0_default_config 复制完整默认配置"
+fi
+
+if ! uci -q get passwall.@global[0] >/dev/null 2>&1; then
+  log "警告：passwall.@global[0] 不存在，跳过 DNS 接管（不写残缺配置）"
+  exit 0
+fi
+
+# ---- 3) PassWall 独占 DNS ----------------------------------------
+# dns_shunt=chinadns-ng：国内外智能分流。chinadns-ng 由 LUCI_DEPENDS 编入，
+#   app.sh 会起 chinadns-ng 实例；固件里确实有这个二进制，不会像误判时那样
+#   「53 被劫持却无人监听」。
+# dns_redirect=1：app.sh 1354 行 RUN_NEW_DNSMASQ=1 → copy 一个 dnsmasq 实例
+#   监听 53，原系统 dnsmasq 让出端口（仍负责 DHCP / 被 copy 的配置源）。
+uci -q set passwall.@global[0].dns_shunt='chinadns-ng'
+uci -q set passwall.@global[0].dns_redirect='1'
+uci -q set passwall.@global[0].direct_dns='223.5.5.5'
+uci -q set passwall.@global[0].direct_dns_mode='udp'
+uci -q set passwall.@global[0].use_default_dns='direct'
+uci -q set passwall.@global[0].filter_proxy_ipv6='0'   # 固件编译期已关 IPv6
+
+# 恢复 53 纳入透明代理（PassWall 自己的 DNS 链路要用），覆盖上一版
+# 「摘出 DNS」时写的 no_redir_ports=53。
+if uci -q get passwall.@global_forwarding[0] >/dev/null 2>&1; then
+  uci -q set passwall.@global_forwarding[0].tcp_no_redir_ports='disable'
+  uci -q set passwall.@global_forwarding[0].udp_no_redir_ports='disable'
+fi
+
+# helper_dnsmasq.lua 的 backup_servers()/restore_servers() 会在启停时把
+# 旧 server 列表合并回写，把「无自定义上游」状态冲掉。清掉这两个备份字段。
+uci -q delete passwall.@global[0].dnsmasq_servers 2>/dev/null
+uci -q delete passwall.@global[0].dnsmasq_dns_redirect 2>/dev/null
+
+uci -q commit passwall
+log "PassWall 独占 DNS: dns_shunt=chinadns-ng dns_redirect=1 direct_dns=223.5.5.5"
+log "链路: LAN → PassWall dnsmasq(53) → chinadns-ng → 国内直连/国外远端"
+
+rm -f /tmp/luci-indexcache
+exit 0
