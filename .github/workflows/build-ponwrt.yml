@@ -71,14 +71,13 @@ on:
           - an7581
           - an7583
       profile:
-        description: '机型 profile (all=全机型编译)'
+        description: '机型 profile（本 fork 只维护这两台；all 已停用）'
         required: true
         default: 'fiberhome_hg5585f-ct'
         type: choice
         options:
           - fiberhome_hg5585f-ct
           - nokia_xg-040g-md-ubi
-          - all
       opt_arm64ce:
         description: 'arm64 汇编加密实现（AN7581 走 NEON 位切片 / AN7583 走 CE，按 SoC 自动选）'
         required: false
@@ -228,12 +227,17 @@ jobs:
           fi
           echo "WIFI7_VENDOR=${WIFI7_VENDOR}" >> "$GITHUB_ENV"
 
-          if [ "$PROFILE" != "all" ]; then
-            case "$PROFILE" in
-              nokia_xg-040g-mf*) SOC="an7583" ;;
-              *)                  SOC="an7581" ;;
-            esac
-          fi
+          # ★ 2026-11-23 编译失败根治：本 fork 只维护 2 个机型（都是 AN7581）。
+          #   原「profile=all → CONFIG_FILE=configs/${SOC}.config」会加载
+          #   an7581.config / an7583.config —— 这两份通用配置仍是上游旧状态，
+          #   里面 Lucky / OpenClash / MosDNS / SmartDNS / Tailscale / EasyTier /
+          #   Fluent / Airoha feed 四包全是 =y，会在下方「插件去重硬校验」处
+          #   直接 exit 1，连 make 都进不去（run 45094702535 就是这么挂的）。
+          #   all 选项已删，这里也不再保留 all 分支。
+          case "$PROFILE" in
+            nokia_xg-040g-mf*) SOC="an7583" ;;
+            *)                 SOC="an7581" ;;
+          esac
 
           # 若传入的 soc 与机型冲突，以机型为准
           echo "SOC=$SOC" >> "$GITHUB_ENV"
@@ -241,15 +245,25 @@ jobs:
           # DEVICE_NAME 同时决定 artifact 名 / Release tag / 旧 tag 清理三处；
           # 末尾带 host 模式，source 与 prebuilt 并行时产物不互相覆盖。
           echo "DEVICE_NAME=ponwrt-${SOC}-${PROFILE}-${HOST_MODE}" >> "$GITHUB_ENV"
-          # profile=all 用 SoC 通用配置；vendor Wi-Fi 7 分支用专用配置
-          if [ "$PROFILE" = "all" ]; then
-            echo "CONFIG_FILE=configs/${SOC}.config" >> "$GITHUB_ENV"
-          elif [ "${WIFI7_VENDOR}" = "true" ]; then
-            echo "CONFIG_FILE=configs/fiberhome_an4475-g2-wifi7.config" >> "$GITHUB_ENV"
-            echo "✅ vendor Wi-Fi 7 配置: configs/fiberhome_an4475-g2-wifi7.config"
-          else
-            echo "CONFIG_FILE=configs/${PROFILE}.config" >> "$GITHUB_ENV"
+          # ★ 只允许两份已维护的机型配置，其余一律早退并给清楚提示。
+          #   WIFI7_VENDOR / an4475-g2 那条路线本 fork 不再维护（config 未同步），
+          #   也不再放行，避免又加载一份含旧插件的配置。
+          case "$PROFILE" in
+            fiberhome_hg5585f-ct) CFG="configs/fiberhome_hg5585f-ct.config" ;;
+            nokia_xg-040g-md-ubi) CFG="configs/nokia_xg-040g-md-ubi.config" ;;
+            all)
+              echo "::error::profile=all 已停用：本 fork 只维护 2 个机型，configs/an7581.config / an7583.config 未同步（仍含已剔除插件的 =y），选它会在插件去重校验处直接失败。请改选具体机型。"
+              exit 1 ;;
+            *)
+              echo "::error::不支持的 profile=${PROFILE}。本 fork 只维护 fiberhome_hg5585f-ct / nokia_xg-040g-md-ubi；其余 configs/*.config 是上游遗留、未同步定制。"
+              exit 1 ;;
+          esac
+          if [ ! -f "$GITHUB_WORKSPACE/$CFG" ]; then
+            echo "::error::找不到机型配置 $CFG（仓库文件缺失？）"
+            exit 1
           fi
+          echo "CONFIG_FILE=$CFG" >> "$GITHUB_ENV"
+          echo "✅ 机型配置: $CFG" 
 
           echo "========================================"
           echo "SoC      : $SOC"
@@ -668,18 +682,16 @@ jobs:
           # 同时落盘一份净化后的机型配置：defconfig 之后要用它把被 kbuild
           # 降级成 "# ... is not set" 的显式 =y 符号写回（见 Validate configuration）。
           EXP="$GITHUB_WORKSPACE/.ci-explicit.config"
-          if [ -e "$GITHUB_WORKSPACE/${CONFIG_FILE}" ]; then
-            clean_cfg "$GITHUB_WORKSPACE/${CONFIG_FILE}" > "$EXP"
-            cat "$EXP" >> .config
-            echo "✅ 已追加机型配置: ${CONFIG_FILE}（行尾注释已剥离）"
-          elif [ -e "$GITHUB_WORKSPACE/configs/${SOC}.config" ]; then
-            clean_cfg "$GITHUB_WORKSPACE/configs/${SOC}.config" > "$EXP"
-            cat "$EXP" >> .config
-            echo "✅ 已追加 SoC 通用配置（行尾注释已剥离）"
-          else
-            echo "::error::找不到机型配置 ${CONFIG_FILE}"
+          # ★ 2026-11-23 再修：原来有个「回退到 configs/${SOC}.config」的 elif，
+          #   配置路径一旦写错就静默加载含旧插件的通用配置，症状离谱且难查。
+          #   现在只认 CONFIG_FILE，缺失直接报错，不再回退。
+          if [ ! -f "$GITHUB_WORKSPACE/${CONFIG_FILE}" ]; then
+            echo "::error::找不到机型配置 ${CONFIG_FILE}；本 fork 只维护两份机型 config，不再回退 SoC 通用配置"
             exit 1
           fi
+          clean_cfg "$GITHUB_WORKSPACE/${CONFIG_FILE}" > "$EXP"
+          cat "$EXP" >> .config
+          echo "✅ 已追加机型配置: ${CONFIG_FILE}（行尾注释已剥离）" 
 
           # ---------------------------------------------------------------
           # ★ 插件去重硬校验（2026-11-23，含用户复核修正）
@@ -695,14 +707,18 @@ jobs:
           #     "::error::插件去重校验失败…igmpproxy" 并 exit 1。
           #     现在把它们移到「必留反查」名单，缺了才报错。
           # ---------------------------------------------------------------
+          # ★ 2026-11-23 误报修复：.config 是「基线 + 追加」，同一符号可能出现
+          #   多次（前面 =y、后面 "# ... is not set"）。只判断「是否存在 =y」会
+          #   把已被关掉的旧包误判为启用。改取该符号的**最后一次有效赋值**。
           DUP_ON=""
           for p in homebox luci-app-homebox luci-i18n-homebox-zh-cn \
                    lucky luci-app-lucky luci-i18n-lucky-zh-cn \
                    luci-app-openclash luci-app-mosdns \
                    luci-app-tailscale luci-app-easytier luci-theme-fluent; do
-            if grep -q "^CONFIG_PACKAGE_${p}=y" .config 2>/dev/null; then
-              DUP_ON="$DUP_ON $p"
-            fi
+            LAST=$(grep -E "^CONFIG_PACKAGE_${p}=(y|m)|^# CONFIG_PACKAGE_${p} is not set" .config 2>/dev/null | tail -1)
+            case "$LAST" in
+              *"=y"|*"=m") DUP_ON="$DUP_ON $p" ;;
+            esac
           done
           if [ -n "$DUP_ON" ]; then
             echo "::error::插件去重校验失败，以下已剔除项又被启用:$DUP_ON"
@@ -711,10 +727,11 @@ jobs:
           fi
           # 必留项反查：组播双代理 + 唯一测速
           for p in omcproxy igmpproxy luci-app-igmpproxy fastnet luci-app-fastnet; do
-            if ! grep -q "^CONFIG_PACKAGE_${p}=y" .config 2>/dev/null; then
-              echo "::error::必留插件 ${p}=y 不见了，检查 configs/*.config（组播双代理是用户明确要求保留的）"
-              exit 1
-            fi
+            LAST=$(grep -E "^CONFIG_PACKAGE_${p}=(y|m)|^# CONFIG_PACKAGE_${p} is not set" .config 2>/dev/null | tail -1)
+            case "$LAST" in
+              *"=y") : ;;
+              *) echo "::error::必留插件 ${p}=y 不见了（最后赋值: ${LAST:-无}），检查 configs/*.config（组播双代理是用户明确要求保留的）"; exit 1 ;;
+            esac
           done
           echo "✅ 插件去重校验通过：组播=omcproxy+igmpproxy（双代理并存）/ 测速=FastNet / DDNS=花生壳 / 代理=PassWall"
 
@@ -828,10 +845,14 @@ jobs:
           # ---------------------------------------------------------------
           if grep -q '^CONFIG_PACKAGE_ddns-scripts=y' .config 2>/dev/null; then
             for p in luci-app-lucky lucky luci-i18n-lucky-zh-cn; do
-              if grep -q "^CONFIG_PACKAGE_${p}=y" .config 2>/dev/null; then
-                echo "::error::DDNS 只留花生壳，但 ${p}=y 仍然存在（Lucky 是另一个 DDNS 客户端）"
-                exit 1
-              fi
+              # 与上面去重校验一致：取最后一次有效赋值，避免「基线 =y +
+              # 追加 is not set」被误判为仍然启用
+              LAST=$(grep -E "^CONFIG_PACKAGE_${p}=(y|m)|^# CONFIG_PACKAGE_${p} is not set" .config 2>/dev/null | tail -1)
+              case "$LAST" in
+                *"=y"|*"=m")
+                  echo "::error::DDNS 只留花生壳，但 ${p}=y 仍然存在（Lucky 是另一个 DDNS 客户端）"
+                  exit 1 ;;
+              esac
             done
             if ! grep -q '^CONFIG_PACKAGE_ddns-scripts-services=y' .config 2>/dev/null; then
               echo "::error::缺 ddns-scripts-services=y，oray.com.json 不会进固件（ddns-scripts 的硬依赖）"

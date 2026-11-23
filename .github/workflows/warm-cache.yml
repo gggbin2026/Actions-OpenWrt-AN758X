@@ -339,6 +339,21 @@ jobs:
           fi
           sed -i '/CONFIG_TARGET_DEVICE_/d; /^CONFIG_TARGET_MULTI_PROFILE=/d' .config
 
+          # ★ 2026-11-23：通用 configs/<SoC>.config 里仍留着本 fork 已剔除插件
+          #   的 =y（Lucky / OpenClash / MosDNS / SmartDNS / Tailscale /
+          #   EasyTier / Fluent / OAF / Airoha feed 四包 / Homebox）。
+          #   预热阶段不关掉，就会把 Ruby / Rust 一起编进工具链缓存，白等
+          #   20~40 分钟。缓存 key 不含配置，主构建会重新展开 .config，
+          #   所以这里关掉不影响固件内容。
+          for p in luci-app-lucky lucky luci-app-openclash luci-app-mosdns \
+                   luci-app-smartdns smartdns luci-app-tailscale tailscale \
+                   luci-app-easytier easytier luci-theme-fluent luci-app-oaf \
+                   luci-app-airoha-factory luci-app-airoha-recovery \
+                   luci-app-clients luci-app-netmode homebox luci-app-homebox; do
+            sed -i "s/^CONFIG_PACKAGE_${p}=y/# CONFIG_PACKAGE_${p} is not set/" .config
+          done
+          echo "✅ 预热配置已剔除本 fork 不再维护的插件" 
+
       - name: Prepare host toolchain (Go / BPF / Python)
         if: env.PREBUILT_HOST == 'true'
         continue-on-error: true
