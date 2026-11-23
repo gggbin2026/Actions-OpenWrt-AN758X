@@ -3,13 +3,15 @@
 # 99-z-custom-defaults —— 出厂默认值（首次开机由 uci-defaults 执行）
 # 仓库：gggbin2026/Actions-OpenWrt-AN758X
 #
-# 2026-11-22 补回：同步上游时这个文件连同 99-zz-homebox、
-# files/etc/config/homebox、files/etc/init.d/homebox 一起丢了，
-# 而文档里一直写着「root/admin / DNS 加速 / 内网 NTP」，属于文档与固件不一致。
+# 2026-11-22 补回：同步上游时这个出厂默认文件整组丢失过一次，
+# 而文档里一直写着「root/admin / DNS 缓存 / 内网 NTP」。
+# 2026-11-23 再修：DNS 已改为「全交 PassWall、系统不配上游」，
+#   本文件原先写的三条上游 + noresolv 会被后面的 99-zz-passwall-dns
+#   删掉，可日志却仍宣称配了三条上游，与事实相反 —— 现已移除。
 #
 # 本文件负责：
 #   1) root 密码 = admin          2) LAN IP = 192.168.1.1
-#   3) 时区 Asia/Shanghai(CST-8)  4) DNS 缓存 + 三个国内上游
+#   3) 时区 Asia/Shanghai(CST-8)  4) DNS 缓存参数（不配上游，PassWall 独占）
 #   5) 内网 NTP server + DHCP option 42 + 防火墙放行 UDP 123
 #   6) 运行期关 IPv6（编译期符号已在 configs/*.config 里关掉）
 #
@@ -46,20 +48,19 @@ uci -q set system.@system[0].zonename='Asia/Shanghai'
 uci -q set system.@system[0].timezone='CST-8'
 
 # ---------------------------------------------------------------
-# 3. DNS 加速：缓存 10000 / 关重绑定 / 三个国内上游 / noresolv
+# 3. DNS 缓存参数（★ 不配任何上游）
 # ---------------------------------------------------------------
+# 本版 DNS 全交 PassWall：LAN → PassWall dnsmasq(53) → chinadns-ng。
+# 系统 dnsmasq 只负责 DHCP 与缓存，**不写 server / noresolv**，
+# 未启用 PassWall 时自然回落 WAN 下发的 DNS，不会断网。
+# 真正的接管逻辑在 99-zz-passwall-dns（本文件之后执行）。
 if uci -q get dhcp.@dnsmasq[0] >/dev/null 2>&1; then
-  uci -q delete dhcp.@dnsmasq[0].server 2>/dev/null
-  uci -q add_list dhcp.@dnsmasq[0].server='223.5.5.5'
-  uci -q add_list dhcp.@dnsmasq[0].server='119.29.29.29'
-  uci -q add_list dhcp.@dnsmasq[0].server='114.114.114.114'
-  uci -q set dhcp.@dnsmasq[0].noresolv='1'
   uci -q set dhcp.@dnsmasq[0].cachesize='10000'
   uci -q set dhcp.@dnsmasq[0].dnsforwardmax='1000'
   uci -q set dhcp.@dnsmasq[0].rebind_protection='0'
-  log "dnsmasq: cachesize=10000 noresolv=1 上游 3 条 重绑定保护=关"
+  log "dnsmasq: cachesize=10000 重绑定保护=关；不配上游，DNS 由 PassWall 独占"
 else
-  log "警告：dhcp.@dnsmasq[0] 不存在，DNS 参数未写入"
+  log "警告：dhcp.@dnsmasq[0] 不存在，DNS 缓存参数未写入"
 fi
 
 # ---------------------------------------------------------------

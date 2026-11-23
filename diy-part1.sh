@@ -820,6 +820,104 @@ fi
 if [ "$ADD_TASKPLAN" = "true" ]; then
   clone https://github.com/sirpdboy/luci-app-taskplan "$PKG_DIR/luci-app-taskplan" main
 fi
+
+# ---------------------------------------------------------------------
+# ★ 2026-11-23 编译失败根治（run 45098102616，耗时 1h48m 后挂）
+#
+#   真错误：2736:./etc/init.d/taskplan: line 14:
+#           /etc/taskplan/taskplan.log: No such file or directory
+#   连锁：make[2] package/install Error 1 → make[1] .package_install Error 2
+#         → make world Error 2。
+#
+#   根因：上游 sirpdboy/luci-app-taskplan@main 新版（"Converted for OpenWrt
+#   25.10", PKG_RELEASE 20260303）在 init.d 脚本**顶层**新增了三行：
+#       # 确保目录存在
+#       [ ! -d $TMP ] && mkdir -p $TMP 2>/dev/null
+#       [ ! -s $LOG ] && echo '' > $LOG
+#   PonWrt 用 apk，package/install 装配 rootfs 时会在 INSTROOT 环境里以
+#   普通 sh 执行包内 ./etc/init.d/taskplan 的顶层（shebang 的
+#   /etc/rc.common 在此环境不存在，被当注释忽略）。此时 $TMP=/etc/taskplan
+#   指向构建主机的 /etc，runner 用户无权创建 → mkdir 失败被 2>/dev/null
+#   吞掉 → echo > /etc/taskplan/taskplan.log 报 No such file → 脚本非 0
+#   退出 → postinst 失败。
+#
+#   修法：顶层不再写任何绝对路径；目录/日志初始化移到运行时函数
+#   run_taskplan() / del_cru() 开头（uci-defaults 也会 mkdir -p 兜底），
+#   并全部用 `|| :` 保证永不因写文件失败而返回非 0。
+#   uci-defaults 里 chmod 一个运行时才生成的文件同样改成容错。
+#
+#   为什么每次都要打：仓库按用户要求 --depth 1 拉 main 最新，不锁 commit，
+#   上游下次改结构时本补丁按内容匹配、不按行号，找不到就明确报错早退，
+#   不会静默编到 1h48m 才炸。
+# ---------------------------------------------------------------------
+if [ "$ADD_TASKPLAN" = "true" ]; then
+  TP_DIR="$PKG_DIR/luci-app-taskplan"
+  TP_INIT="$(find "$TP_DIR" -path '*/root/etc/init.d/taskplan' -type f 2>/dev/null | head -1)"
+  TP_UCI="$(find "$TP_DIR" -path '*/root/etc/uci-defaults/luci-taskplan' -type f 2>/dev/null | head -1)"
+
+  if [ -z "$TP_INIT" ] || [ ! -f "$TP_INIT" ]; then
+    echo "::error::taskplan 的 init.d 没找到（上游改了目录结构？）。本补丁是编译必需项，不能静默跳过：package/install 会在约 1.5 小时后因 init.d 顶层写 /etc 失败。"
+    exit 1
+  fi
+
+  python3 - "$TP_INIT" "${TP_UCI:-}" <<'PYFIX'
+import sys, io
+p = sys.argv[1]
+u = sys.argv[2] if len(sys.argv) > 2 else ''
+s = io.open(p, encoding='utf-8').read()
+orig_lines = s.splitlines()
+
+# 1) 移除顶层三行「确保目录存在」（按内容匹配，上游换行/缩进变化也能命中）
+lines = [l for l in s.splitlines(True)
+         if not (l.strip() == '# 确保目录存在'
+                 or '[ ! -d $TMP ] && mkdir -p $TMP' in l
+                 or "[ ! -s $LOG ] && echo '' > $LOG" in l)]
+removed = len(s.splitlines(True)) - len(lines)
+s = ''.join(lines)
+
+# 2) 在 run_taskplan() / del_cru() 的 '{' 之后插入幂等初始化
+init = ('    mkdir -p "$TMP" 2>/dev/null || :\n'
+        '    [ -d "$TMP" ] && : > "$LOG" 2>/dev/null || :\n')
+out, i, inserted = [], 0, 0
+while i < len(s.splitlines(True)):
+    L = s.splitlines(True)
+    out.append(L[i])
+    if L[i].strip() in ('run_taskplan()', 'del_cru()'):
+        j = i + 1
+        while j < len(L) and L[j].strip() != '{':
+            out.append(L[j]); j += 1
+        if j < len(L):
+            out.append(L[j]); out.append(init); inserted += 1
+            i = j + 1
+            continue
+    i += 1
+s = ''.join(out)
+io.open(p, 'w', encoding='utf-8', newline='\n').write(s)
+print('  ✅ init.d/taskplan: 顶层移除 %d 行，运行时初始化插入 %d 处' % (removed, inserted))
+
+# 3) uci-defaults 里 /etc/taskplan/taskplanrun 打包时不存在 → chmod 容错
+if u:
+    t = io.open(u, encoding='utf-8').read()
+    old = ('chmod +x /usr/libexec/rpcd/luci.taskplan /etc/init.d/taskplan '
+           '/etc/taskplan/taskplanrun /usr/bin/taskplanhandler')
+    new = ('chmod +x /usr/libexec/rpcd/luci.taskplan /etc/init.d/taskplan '
+           '/usr/bin/taskplanhandler 2>/dev/null || :\n'
+           '[ -f /etc/taskplan/taskplanrun ] && chmod +x /etc/taskplan/taskplanrun 2>/dev/null || :')
+    if old in t:
+        io.open(u, 'w', encoding='utf-8', newline='\n').write(t.replace(old, new, 1))
+        print('  ✅ uci-defaults/luci-taskplan: chmod 已容错')
+PYFIX
+
+  # 编译前硬校验：只按内容精确匹配「原始顶层两行」。
+  # 不能 head -20 粗扫 —— 补丁把 mkdir -p "$TMP" 插到了 run_taskplan() 里
+  # （约第 15 行），粗扫会把我们自己插入的初始化误判成未修复。
+  # 早退在 diy 阶段（几分钟），不要等 1h48m 才在 package/install 炸。
+  if grep -qE '^\[ ! -d \$TMP \] && mkdir -p \$TMP|^\[ ! -s \$LOG \] && echo .. > \$LOG' "$TP_INIT"; then
+    echo "::error::taskplan init.d 顶层仍会写 /etc/taskplan（补丁未生效），package/install 必然失败"
+    exit 1
+  fi
+  echo "✅ taskplan 编译期 postinst 修复完成：顶层不写 /etc，初始化移到运行时函数"
+fi
 # --- watchdog ---
 # ⚠ 仓库是 monorepo：根目录无 Makefile，luci-app-watchdog/（前端）与
 #   watchdog/（本体）是两个包，前者依赖 +watchdog，两个都要拷。

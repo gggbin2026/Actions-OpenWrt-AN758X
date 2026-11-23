@@ -15,17 +15,18 @@
 # 链路：LAN → PassWall dnsmasq(53) → chinadns-ng → 国内直连 / 国外远端
 #       未启用 PassWall 时：系统 dnsmasq 回落 WAN 下发的 DNS（不会断网）。
 #
-# 排序：99-z-custom-defaults（写三条上游 + noresolv）→ 99-zz-homebox →
-#       本文件（最后清空上游、写 PassWall，保证最终状态不被覆盖）。
+# 排序：99-z-custom-defaults（只写缓存参数，不写上游）→ 99-zz-ddns-only-oray
+#       → 99-zz-igmp-snooping → 本文件（最后写 PassWall，保证最终状态不被覆盖）。
 # 幂等：可重复执行；没装 PassWall 就安静跳过，不创建残缺配置。
 # ================================================================
 
 log() { logger -t passwall-dns "$@"; }
 
 # ---- 1) 剔除系统自带 DNS 配置 -------------------------------------
-# 99-z-custom-defaults 会写「三条国内上游 + noresolv=1 + cachesize=10000」；
-# 上一版的 99-zz-smartdns 还会写 strictorder / 6053。这里全部清掉，
-# 只保留缓存与重绑定保护设置，让 dnsmasq 回到「无自定义上游」状态。
+# 99-z-custom-defaults 现在只写缓存参数、不再写上游；这里的 delete 是
+# 幂等兜底 —— 兼容跨版本升级时旧 /etc/config/dhcp 里残留的
+# server / noresolv / strictorder / 6053（SmartDNS 时代的老配置）。
+# 最终状态：dnsmasq 无自定义上游，只留 DHCP / 缓存。
 if uci -q get dhcp.@dnsmasq[0] >/dev/null 2>&1; then
   uci -q delete dhcp.@dnsmasq[0].server
   uci -q delete dhcp.@dnsmasq[0].strictorder

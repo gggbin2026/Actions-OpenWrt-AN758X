@@ -1,7 +1,25 @@
 # PonWrt CI — Airoha AN758x PON 云编译
 
 基于 P3TERX `Actions-OpenWrt` 模板重构，源码指向 [pbs05/ponwrt](https://github.com/pbs05/ponwrt)（默认分支 `master`）。
-产出 AN7581 / AN7583 PON 光猫的 OpenWrt 固件，带机型选择、磁盘释放和滚动构建缓存。
+产出 Airoha AN758x PON 光猫的 OpenWrt 固件，带机型选择、磁盘释放和滚动构建缓存。
+
+> ## 当前状态（2026-11-23，自用 fork 定制版）
+>
+> **只维护两个机型**：`fiberhome_hg5585f-ct`（272 个包）/ `nokia_xg-040g-md-ubi`（262 个包）。
+> `profile=all` 与其余 `configs/*.config` 是上游遗留、**未同步定制**，已停用。
+>
+> | 项目 | 当前实现 |
+> |---|---|
+> | 光猫管理 | 只用 `luci-app-onu`（LOID / 认证 / IPTV / 语音 / 诊断）；Airoha feed 四页面与旧 PON 栈已移除 |
+> | 组播 | `omcproxy` + `igmpproxy` / `luci-app-igmpproxy` **双代理并存** + `rtp2httpd` v3.17.2；**IGMP Snooping 首启自动开启** |
+> | DNS | **PassWall 独占**：`dns_shunt=chinadns-ng` + `dns_redirect=1`；系统 dnsmasq 只留 DHCP/缓存，不配上游；SmartDNS 已整组移除 |
+> | DDNS | **只留花生壳 `oray.com`**：Lucky 移除，首启清掉其余 93 个 provider |
+> | 测速 | 只留 `FastNet`（Homebox 移除） |
+> | 商店/主题 | iStore 移除（用 FastNet + apk 界面）；ARGON 主题 |
+> | 出厂默认 | `192.168.1.1` / `root` `admin`、Asia/Shanghai、内网 NTP + option 42、IPv6 关闭、5G WiFi CN/HE160 |
+> | 发布 | 每次按时间新建 Release `fw-<机型>-<时间戳>-r<run>a<attempt>`，**只保留最近 5 次**；固件打成 `.tar.zst` |
+>
+> 完整清单见 `固件发布日志.md` / `插件冲突排查报告.md` / `上传与核对说明.md`。
 
 ## 快速开始
 
@@ -9,7 +27,7 @@
 
 1. **Warm Build Cache** → `soc=an7581和an7583`、`prebuilt_host=预编译`，把工具链缓存建起来
 2. **Build PonWrt** → 选 `soc` / `profile` → `scope=firmware` 出固件
-3. 仍然超时：把 `configs/*.config` 里不需要的 luci-app / 语言包删掉再提交
+3. 仍然超时：改 **两份机型 config**（`configs/fiberhome_hg5585f-ct.config` / `configs/nokia_xg-040g-md-ubi.config`）里不需要的 luci-app / 语言包再提交；不要动 `configs/an7581.config` 等通用配置
 
 > 不预热也能直接跑 `firmware`——缓存是滚动式的，第一次跑完会自动存下工具链。预热只是给怕超时的人用的。
 
@@ -38,18 +56,21 @@
 | `cache-keepalive.yml` | 每 3 天 | 逐条真实恢复，避开 `actions/cache` 的 7 天未访问回收 |
 | `cache-clean.yml` | 手动 / 每周一 04:20 | `rollover` 每族留最新一代 / `backup` 只清 Release 备份 / `all` 全删 |
 
-## 支持的机型
+## 支持的机型（本 fork 实际维护的）
 
-| SoC | profile |
-|---|---|
-| AN7581 | `fiberhome_hg5382a` `fiberhome_an4475-g2`† `fiberhome_hg5585f-ct` `fiberhome_hg5585f-cu` `gemtek_xg2010g` `nokia_xg-040g-md-ubi` `nokia_xg-040g-tf-ubi` `unionman_ung00a` `znxt_zn504xg-d` `znxt_zn515xg-d` `h3c_hm2004-du`※ |
-| AN7583 | `nokia_xg-040g-mf` `nokia_xg-040g-mf-ubi` |
+| SoC | profile | 配置 | 说明 |
+|---|---|---|---|
+| AN7581 | `fiberhome_hg5585f-ct` | `configs/fiberhome_hg5585f-ct.config` | 带 MT7916D WiFi、分页式 BOSA、GPY211 2.5G PHY |
+| AN7581 | `nokia_xg-040g-md-ubi` | `configs/nokia_xg-040g-md-ubi.config` | 无 WiFi；EN7572 光前端 + EN8811H PHY |
 
-※ `h3c_hm2004-du` 额外依赖私有仓库 `openwrt-fttr`（FTTR 驱动 / 控制端 / FPGA 固件）与 `luci-app-fttr`，缺凭证时 `diy-part1.sh` 会直接报错退出。
+**Build PonWrt 的 `profile` 下拉只有这两项**。`all` 已停用：它原来会加载
+`configs/an7581.config` / `an7583.config`，这两份仍是上游旧状态（Lucky /
+OpenClash / MosDNS / SmartDNS / Tailscale / EasyTier / Fluent / Airoha feed
+四包都还是 `=y`），会在 `Load custom configuration` 的插件去重硬校验处直接
+`exit 1`，连 `make` 都进不去（run `45094702535` 就是这么挂的）。
 
-† `fiberhome_an4475-g2` 的板级 DTS / profile 在 **`qwe-qaq/ponwrt@master`**，构建时 `source` 必须选 `fork`（`pbs05/ponwrt` 尚未合入，会在 `Validate configuration` 阶段因机型符号不存在而失败）。`factory` UBI 卷为 **2 MiB**（AN4-2MiB 容器）。FTTR 后端三件套（`h3c-fmcs` / `openwrt-fttr` / FPGA 固件）是 HM2004-DU 专属，本机用 SoC 内置下行 PON，**不启用** `ADD_FTTR`。
-
-  另有 **`wifi7-an4475` 分支的 vendor full-MAC 驱动路线**，与 `master` 的 mt76 路线互斥，见下一节。
+仓库里其余 14 份 `configs/*.config` 与 `AN4475-G2 / Wi-Fi 7 / FTTR` 相关章节
+是**上游遗留文档**，本 fork 不维护、不参与构建，仅供查阅。
 
 ## AN4475-G2 vendor Wi-Fi 7 云编译（`wifi7-an4475` 分支）
 
@@ -88,34 +109,46 @@ CI 只能证明「编译通过、镜像里固件齐全」，不能证明「加�
 
 ## 插件开关（`diy-part1.sh`）
 
-全部默认开启，开关与 `configs/an7581.config` / `an7583.config` 里的 `=y` 一一对应：
+⚠ **旧版说明「开关与两个通用 config 一一对应、要关插件改通用 config」已作废。**
+现在 `profile=<机型>` 时**只认 `configs/${PROFILE}.config`**，两份通用 config 完全不参与。
 
-| 开关 | 包 | 备注 |
-|---|---|---|
-| `ADD_AIROHA_NPU` | `luci-app-airoha-npu` | NPU 卸载 / CPU 频率 / Frame Engine / PPE 流表 |
-| `ADD_LUCI_APP` | `luci-app-natmode`、`luci-app-pon-status`、`luci-app-igmpproxy` | NAT 类型三选一、PON 光模块卡片、IGMP Proxy 组播代理 Web 界面 |
-| `ADD_FLUENT` | `luci-theme-fluent` | 与 `argon` / `bootstrap` 可共存 |
-| `ADD_PASSWALL` | `luci-app-passwall` + `xray-core` / `sing-box` | 新版 passwall 把内核做成按需安装，config 里另开了两个 feeds 现成的 |
-| `ADD_OPENCLASH` | `luci-app-openclash` | ⚠ 拖 Ruby 进构建，首次 +20~40 分钟 |
-| `ADD_MOSDNS` | `luci-app-mosdns` | 本体用 feeds 的 `mosdns` |
-| `ADD_SMARTDNS` | `luci-app-smartdns` | 本体用 feeds 的 `smartdns` |
-| `ADD_TAILSCALE` | `luci-app-tailscale` | 本体用 feeds 的 `tailscale` |
-| `ADD_LUCKY` | `luci-app-lucky` | 含 `lucky` 本体 |
-| `ADD_OPENLIST` | `luci-app-openlist2` | 含 `openlist2` 本体 |
-| `ADD_EASYTIER` | `luci-app-easytier` + `easytier` | 本体是 Rust 包，编译较慢 |
-| `ADD_POWEROFF` / `ADD_OWQ_WOL` / `ADD_WATCHDOG` / `ADD_TASKPLAN` | 同名 `luci-app-*` | |
-| `ADD_OAF` | `luci-app-oaf` + `appfilter` / `kmod-oaf` | 含内核模块 |
+### 当前编入的插件（两组 config 软件部分一致）
 
-**要关掉某个插件，改两处**：脚本里 `ADD_xxx=false`，**并且**把两个通用 config 里对应的
-`CONFIG_PACKAGE_xxx=y` 删掉（或改成 `# ...is not set`）。只改一处会不一致：
-只关脚本 → `make defconfig` 把 `=y` 静默剔除；只关 config → 白 clone 一个仓库。
+| 分类 | 包 |
+|---|---|
+| 光猫 | `luci-app-onu` + 中文、`luci-app-pon-status`、`luci-app-natmode`、`luci-app-airoha-npu`（只读状态页） |
+| 组播 | `omcproxy` + `igmpproxy` + `luci-app-igmpproxy`、`rtp2httpd` v3.17.2 + LuCI + 中文；IGMP Snooping 由 `99-zz-igmp-snooping` 首启开启 |
+| DNS / 代理 | `luci-app-passwall` + `xray-core` / `sing-box` / `chinadns-ng` / `dns2socks` |
+| DDNS | `ddns-scripts` + `luci-app-ddns` + `ddns-scripts-services`（运行期收敛到只剩 `oray.com.json`） |
+| 测速 | `fastnet` / `luci-app-fastnet` / `linkease-app-entry` |
+| 系统 | `ttyd`、`watchdog`（登录失败拉黑）、`taskplan`、`accesscontrol-plus`、`vantage`、`nft-qos`、`luci-app-package-manager` |
+| USB 打印 | `p910nd` / `printer-support` / `luci-app-usb-printer` + 全套 USB 内核模块 |
+| 主题 | `luci-theme-argon`（bootstrap 是 LuCI 基础主题，保留） |
 
-**四个「只用 feeds」的包**（`MOSDNS` / `SMARTDNS` / `PASSWALL` / `TAILSCALE`）：它们的本体
-（`mosdns` / `smartdns` / `xray-core` / `sing-box` / `tailscale`）feeds 里已有同名包，
-第三方源再拉一份会让索引里出现两个同名 `Package`，`package-metadata` 按扫描顺序挑一个、
-行为不可预期。所以脚本只拷 luci 前端，本体一律用 feeds 的。
+**简体中文包 14 个**。完整逐项见 `固件发布日志.md`。
 
-`ADD_FTTR` 及其子开关只在 `h3c_hm2004-du` 下生效，其余机型自动跳过。
+### 已移除 / 白开（别被旧文档骗）
+
+`iStore`、`luci-app-airoha` feed 四页面、旧 `luci-app-pon`、`Homebox`、
+`Lucky`、`SmartDNS`、`OpenClash`、`MosDNS`、`Tailscale`、`EasyTier`、
+`Fluent` 主题、`OAF`、`FTTR` —— 全部不编入。其中 `ADD_OPENCLASH` /
+`ADD_MOSDNS` / `ADD_TAILSCALE` / `ADD_EASYTIER` / `ADD_FLUENT` 等开关已置
+`false`（原来「开关 true 但 config 无 `=y`」属白 clone，拖 Ruby/Rust 白等时间）。
+
+### 想增删插件，改哪里
+
+**改两处，且都在这两份文件里**：
+
+1. `configs/fiberhome_hg5585f-ct.config` 和 `configs/nokia_xg-040g-md-ubi.config`
+   里写 `CONFIG_PACKAGE_<包名>=y`（或 `is not set`）
+2. `diy-part1.sh` 里对应的 `ADD_xxx` 开关 + clone/拷包逻辑
+
+只改一处不生效：只改 config → 源码没进 `package/custom/`，`make defconfig`
+静默剔除；只改 diy → 白 clone 一份不进固件的源码。
+
+> `profile=all` 已停用，`configs/an7581.config` / `an7583.config` 只被
+> `warm-cache.yml` 用来预热工具链（且预热时会把已剔除插件的 `=y` 过滤掉）。
+> 它们**不影响固件内容**。
 
 ## 构建缓存（移植自 VIKINGYFY/OpenWRT-CI）
 
@@ -242,6 +275,7 @@ openssl speed -evp chacha20-poly1305
 ## 已知限制
 
 - 只有 `scope=firmware` 且编译成功才发 Release；`toolchain-only` 不发，空固件目录会跳过。
-- Release tag 固定为 `<机型>-<分支>`，每次覆盖，所以每个机型只有一份固件，不是「保留最近 N 份」。
+- Release 每次按上海时间新建独立 tag `fw-<机型>-<YYYYMMDD-HHMMSS>-r<run>a<attempt>`，**只保留最近 5 次**（只删 `fw-` 前缀，`cache-backup` 不动）；固件附件打成 `.tar.zst`，裸 `.itb` 只在 Artifact。
 - NPU 只在三层路由模式生效，纯 AP 桥接时整机吞吐会掉到 2000 Mbps 左右。
-- `repository_dispatch` 触发时所有 choice 输入都是空，走的是各 env 的回退值。
+- `repository_dispatch` 触发时所有 choice 输入都是空，走 env 回退值：`PROFILE=fiberhome_hg5585f-ct`、`SOC=an7581`、`scope=firmware`。
+- 网页上传会把 `.sh` / uci-defaults 存成 `100644`（丢执行位）；`build-ponwrt.yml` 在编译前统一 `chmod +x`，走 CI 不受影响，脱离 CI 手动打包才需要自己补。
