@@ -691,6 +691,17 @@ jobs:
           fi
           clean_cfg "$GITHUB_WORKSPACE/${CONFIG_FILE}" > "$EXP"
           cat "$EXP" >> .config
+
+          # ★ 2026-11-23 致命错误早退（run 45120205156 / #28）：
+          #   开 CONFIG_USE_MKLIBS 会在 package/install 末尾调用 mklibs，
+          #   这套 apk + musl 构建里 mklibs 找不到 rootfs 的 lib/libc.so，
+          #   报 "Library not found: .../lib/libc.so" → Error 1，三轮重试全挂。
+          #   这里在 diy 阶段（几分钟）就拦住，别再浪费 1.5 小时。
+          if grep -q '^CONFIG_USE_MKLIBS=y' .config 2>/dev/null; then
+            echo "::error::CONFIG_USE_MKLIBS=y 与 apk+musl 不兼容：mklibs 会报 Library not found: lib/libc.so 并在 package/install 失败。请把 configs/*.config 改成 '# CONFIG_USE_MKLIBS is not set'；压缩用发布期 .tar.zst 即可。"
+            exit 1
+          fi
+          echo "✅ mklibs 已禁用（压缩由发布期 .tar.zst 负责）"
           echo "✅ 已追加机型配置: ${CONFIG_FILE}（行尾注释已剥离）" 
 
           # ---------------------------------------------------------------
@@ -1768,8 +1779,13 @@ jobs:
           # 2026-11-22 通读 run #23 完整日志后放宽：
           #   真错误是「Package tar is missing dependencies for the following libraries:
           #   libacl.so.1」，旧正则只认 ERROR:/error:/***，整行被漏掉，
-          #   首屏只剩 make 的包装层。补上打包 / 链接 / 安装类常见失败措辞。
-          ERRS=$(grep -nE '(^|[[:space:]])(ERROR:|error:|\*\*\* .*Error [0-9]+|make(\[[0-9]+\])?: \*\*\*)|unable to select packages|no such package|Image too big|missing dependencies for the following libraries|cannot stat|No such file|undefined reference|cannot find -l|No space left|configure: error|apk: .*error|Permission denied|is missing dependencies' \
+                    #   首屏只剩 make 的包装层。补上打包 / 链接 / 安装类常见失败措辞。
+          #   2026-11-23 再修：去掉裸 `No such file` —— 构建期 enable 阶段脚本顶层
+          #   source 绝对路径（./etc/init.d/pon → jshn.sh、passwall/utils.sh →
+          #   network.sh）会打这类提示，但 make 并没停，标红纯属误导。这类脚本已由
+          #   diy-part1.sh 的「init.d 顶层 source 容错化」根治，真正的安装失败另有
+          #   cannot stat / missing dependencies / Library not found 等精确措辞。
+          ERRS=$(grep -nE '(^|[[:space:]])(ERROR:|error:|\*\*\* .*Error [0-9]+|make(\[[0-9]+\])?: \*\*\*)|unable to select packages|no such package|Image too big|missing dependencies for the following libraries|cannot stat|undefined reference|cannot find -l|No space left|configure: error|apk: .*error|Permission denied|is missing dependencies' \
                    "$LOG" | tail -20 | tr -d '\r' || true)
           if [ -n "$ERRS" ]; then
             # 只发最后 4 条：越靠后越接近根因，前面的多半是包装层
