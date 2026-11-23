@@ -8,3 +8,4 @@
 |---|---|---|---|---|---|
 | 20261122-231203 | 烽火 HG5585F-CT 电信版（XG-PON 网关，MT7916D WiFi） | `fiberhome_hg5585f-ct` | [`fw-fiberhome_hg5585f-ct-20261122-231203-r45025094581a1`](https://github.com/gggbin2026/Actions-OpenWrt-AN758X/releases/tag/fw-fiberhome_hg5585f-ct-20261122-231203-r45025094581a1) | `f6977f2` | 按时间生成 · 保留最近 5 次 |
 | 20261123-174931 | 烽火 HG5585F-CT 电信版（XG-PON 网关，MT7916D WiFi） | `fiberhome_hg5585f-ct` | [`fw-fiberhome_hg5585f-ct-20261123-174931-r45135215248a1`](https://github.com/gggbin2026/Actions-OpenWrt-AN758X/releases/tag/fw-fiberhome_hg5585f-ct-20261123-174931-r45135215248a1) | `f6977f2` | 按时间生成 · 保留最近 5 次 |
+| 20261123-193607 | Nokia XG-040G-MD（UBI，双 USB，无 WiFi） | `nokia_xg-040g-md-ubi` | [`fw-nokia_xg-040g-md-ubi-20261123-193607-r45150958826a1`](https://github.com/gggbin2026/Actions-OpenWrt-AN758X/releases/tag/fw-nokia_xg-040g-md-ubi-20261123-193607-r45150958826a1) | `f6977f2` | 按时间生成 · 保留最近 5 次 |
