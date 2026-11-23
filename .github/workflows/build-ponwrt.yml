@@ -645,11 +645,19 @@ jobs:
       - name: Load custom configuration
         run: |
           cd "$BUILD_ROOT/openwrt"
-          [ -e "$GITHUB_WORKSPACE/files" ] && cp -r "$GITHUB_WORKSPACE/files" files
+          # 幂等合并：原来 `cp -r src files` 在目标目录已存在时会变成 files/files/，
+          # 定制文件悄悄失效；改成 mkdir + cp -a src/. 后多轮重跑都一样。
+          if [ -d "$GITHUB_WORKSPACE/files" ]; then
+            mkdir -p files
+            cp -a "$GITHUB_WORKSPACE/files/." files/
+          fi
 
           # git 可能在 checkout 时丢掉 exec bit，rpcd 就执行不了 tempinfo
           [ -d files/sbin ] && chmod +x files/sbin/* 2>/dev/null
           [ -d files/etc/uci-defaults ] && chmod +x files/etc/uci-defaults/* 2>/dev/null
+          # init.d / uci-defaults 的执行位（Homebox 移除后仍保留：其它服务可能用到）
+          [ -d files/etc/init.d ] && chmod +x files/etc/init.d/* 2>/dev/null
+          [ -d files/etc/config ] && chmod 644 files/etc/config/* 2>/dev/null
 
 
           # Kconfig 读 .config 时把 "=y  # 注释" 中 # 之后的全部内容当值，
@@ -671,6 +679,188 @@ jobs:
           else
             echo "::error::找不到机型配置 ${CONFIG_FILE}"
             exit 1
+          fi
+
+          # ---------------------------------------------------------------
+          # ★ 插件去重硬校验（2026-11-23，含用户复核修正）
+          #   用户先说「两个插件之间有类似的，就只保留一个」，随后又明确
+          #   「组播代理也要保留」「igmp snooping 也要」。
+          #   最终口径：
+          #     · 组播代理：omcproxy + igmpproxy **两个都保留**（用户复核覆盖去重）
+          #     · 测速/链路：只留 FastNet（Homebox 移除）
+          #     · DDNS：只留花生壳（上一版已收敛）
+          #     · 代理：只留 PassWall
+          #   ⚠ 错误日志修复：旧版把 igmpproxy / luci-app-igmpproxy 列进
+          #     禁用名单，用户恢复双代理后每次编译都会误报
+          #     "::error::插件去重校验失败…igmpproxy" 并 exit 1。
+          #     现在把它们移到「必留反查」名单，缺了才报错。
+          # ---------------------------------------------------------------
+          DUP_ON=""
+          for p in homebox luci-app-homebox luci-i18n-homebox-zh-cn \
+                   lucky luci-app-lucky luci-i18n-lucky-zh-cn \
+                   luci-app-openclash luci-app-mosdns \
+                   luci-app-tailscale luci-app-easytier luci-theme-fluent; do
+            if grep -q "^CONFIG_PACKAGE_${p}=y" .config 2>/dev/null; then
+              DUP_ON="$DUP_ON $p"
+            fi
+          done
+          if [ -n "$DUP_ON" ]; then
+            echo "::error::插件去重校验失败，以下已剔除项又被启用:$DUP_ON"
+            echo "  测速只留 FastNet、DDNS 只留花生壳、代理只留 PassWall；组播代理 omcproxy + igmpproxy 两个都保留"
+            exit 1
+          fi
+          # 必留项反查：组播双代理 + 唯一测速
+          for p in omcproxy igmpproxy luci-app-igmpproxy fastnet luci-app-fastnet; do
+            if ! grep -q "^CONFIG_PACKAGE_${p}=y" .config 2>/dev/null; then
+              echo "::error::必留插件 ${p}=y 不见了，检查 configs/*.config（组播双代理是用户明确要求保留的）"
+              exit 1
+            fi
+          done
+          echo "✅ 插件去重校验通过：组播=omcproxy+igmpproxy（双代理并存）/ 测速=FastNet / DDNS=花生壳 / 代理=PassWall"
+
+          # ---------------------------------------------------------------
+          # ★ IGMP Snooping 硬校验（2026-11-23 新增）
+          #   用户「igmp snooping 也要」：netifd 自 commit 52541140 起
+          #   默认关闭 igmp_snoop，必须显式写 UCI。
+          #   实现放在 files/etc/uci-defaults/99-zz-igmp-snooping：
+          #     找 type=bridge 的 config device 写 igmp_snooping=1，
+          #     并在 br-lan 存在时写 sysfs 兜底。
+          #   ⚠ 这是运行期配置，不是 .config 符号；CONFIG_BRIDGE_IGMP_SNOOPING
+          #     是内核符号，写顶层 .config 会被 target config 覆盖，故不在此查。
+          # ---------------------------------------------------------------
+          SNOOP_SCRIPT="files/etc/uci-defaults/99-zz-igmp-snooping"
+          if [ ! -f "$SNOOP_SCRIPT" ]; then
+            echo "::error::缺 $SNOOP_SCRIPT，IGMP Snooping 不会开启（用户明确要求）"
+            exit 1
+          fi
+          for kw in 'igmp_snooping=1' 'multicast_snooping' 'logger -t igmp-snoop'; do
+            if ! grep -qF "$kw" "$SNOOP_SCRIPT"; then
+              echo "::error::$SNOOP_SCRIPT 缺少关键逻辑: $kw"
+              exit 1
+            fi
+          done
+          if grep -qE 'echo "::(warning|error)::' "$SNOOP_SCRIPT"; then
+            echo "::error::$SNOOP_SCRIPT 里出现 GitHub 注解式输出（在路由器上会变成错误日志），请改用 logger"
+            exit 1
+          fi
+          echo "✅ IGMP Snooping 首启脚本齐备（UCI bridge igmp_snooping=1 + sysfs 兜底）"
+
+          # ---------------------------------------------------------------
+          # DNS 架构硬校验（2026-11-23）——「剔除系统 DNS，只要 PassWall」
+          #   本版 SmartDNS 整组退出，DNS 由 PassWall 独占：
+          #     LAN → PassWall dnsmasq(53) → chinadns-ng → 国内直连 / 国外远端
+          #   ⚠ chinadns-ng 必须 =y：dns_shunt=chinadns-ng 要起这个二进制，
+          #     缺了就会把 53 劫持到无人监听的端口 → DNS 全断。
+          #     PassWall 的 LUCI_DEPENDS 本来就带 +chinadns-ng（defconfig 会自动拉），
+          #     这里显式校验只是防止 config 同步时被误删。
+          #   ⚠ dnsmasq-full 必须保留：LAN DHCP 靠它，PassWall LUCI_DEPENDS 也硬依赖。
+          # ---------------------------------------------------------------
+          if grep -q '^CONFIG_PACKAGE_luci-app-passwall=y' .config 2>/dev/null; then
+            if grep -q '^CONFIG_PACKAGE_smartdns=y' .config 2>/dev/null; then
+              echo "::error::smartdns 仍是 =y：本版 DNS 全交 PassWall，SmartDNS 三行必须 is not set"
+              exit 1
+            fi
+            if ! grep -q '^CONFIG_PACKAGE_chinadns-ng=y' .config 2>/dev/null; then
+              echo "::error::缺 chinadns-ng=y：PassWall dns_shunt=chinadns-ng 会劫持 53 到无人监听的端口，DNS 全断"
+              exit 1
+            fi
+            if ! grep -q '^CONFIG_PACKAGE_dnsmasq-full=y' .config 2>/dev/null; then
+              echo "::error::缺 dnsmasq-full：LAN DHCP 与 PassWall LUCI_DEPENDS 都依赖它，不能删"
+              exit 1
+            fi
+            PW_DNS="files/etc/uci-defaults/99-zz-passwall-dns"
+            if [ ! -f "$PW_DNS" ]; then
+              echo "::error::缺 $PW_DNS，PassWall 不会接管 DNS / 系统上游不会被剔除"
+              exit 1
+            fi
+            if ! grep -q "dns_shunt='chinadns-ng'" "$PW_DNS"; then
+              echo "::error::$PW_DNS 没设 dns_shunt=chinadns-ng（还是上一版「摘出 DNS」的写法？）"
+              exit 1
+            fi
+            if ! grep -q "dns_redirect='1'" "$PW_DNS"; then
+              echo "::error::$PW_DNS 没设 dns_redirect=1，PassWall 不会接管 53"
+              exit 1
+            fi
+            echo "✅ DNS = PassWall 独占（chinadns-ng + dns_redirect=1）；SmartDNS 已剔除，dnsmasq 只留 DHCP/缓存"
+          fi
+
+          # ---------------------------------------------------------------
+          # rtp2httpd v3.17.2 + 花生壳 DDNS 硬校验（2026-11-23）
+          #   三个 =y 缺一，defconfig 会把包静默剔除，固件里就没菜单；
+          #   出厂 ddns 配置缺了/写错 service_name，LuCI 里选不到 oray.com。
+          # ---------------------------------------------------------------
+          if grep -q '^CONFIG_PACKAGE_rtp2httpd=y' .config 2>/dev/null; then
+            for p in luci-app-rtp2httpd luci-i18n-rtp2httpd-zh-cn; do
+              if ! grep -q "^CONFIG_PACKAGE_${p}=y" .config 2>/dev/null; then
+                echo "::error::rtp2httpd=y 但缺 CONFIG_PACKAGE_${p}=y（LuCI 界面或中文包会被剔除）"
+                exit 1
+              fi
+            done
+            echo "✅ rtp2httpd 三包齐备（本体 / LuCI / 中文），diy 从 stackia/rtp2httpd main 拷入"
+            # 同名包双份检查：immortalwrt feeds 里本来就有 rtp2httpd 3.16.0 +
+            # luci-app-rtp2httpd，不删会和我们拷的 v3.17.2 一起进索引。
+            R2_DUP=""
+            for d in feeds/packages/net/rtp2httpd \
+                     feeds/luci/applications/luci-app-rtp2httpd \
+                     package/feeds/packages/rtp2httpd \
+                     package/feeds/luci/luci-app-rtp2httpd; do
+              if [ -e "$d" ] || [ -L "$d" ]; then R2_DUP="$R2_DUP $d"; fi
+            done
+            if [ -n "$R2_DUP" ]; then
+              echo "::error::rtp2httpd 同名包双份，索引会挑错版本（feeds 3.16.0 vs 定制 3.17.2）:$R2_DUP"
+              echo "  在 diy-part1.sh 的 ADD_RTP2HTTPD 段删除 feeds 源码目录与 package/feeds 链接"
+              exit 1
+            fi
+            if ! grep -q '^RELEASE_VERSION:=3.17.2' package/custom/rtp2httpd/Makefile 2>/dev/null; then
+              echo "::error::package/custom/rtp2httpd/Makefile 不是 v3.17.2（可能被 feeds 同名包覆盖）"
+              exit 1
+            fi
+            echo "✅ rtp2httpd 索引唯一：仅 package/custom 一份，v3.17.2（feeds 3.16.0 同名包已清）"
+          fi
+          # ---------------------------------------------------------------
+          # DDNS 只留花生壳 硬校验（2026-11-23）
+          #   用户「DDNS 只要花生壳的这个，其他的都得剔除」：
+          #     · Lucky 整组（另一个 DDNS 客户端）不得 =y
+          #     · 出厂 /etc/config/ddns 只允许一条 service，且必须是 oray.com
+          #     · 首启脚本 99-zz-ddns-only-oray 必须在，负责删掉另外 93 个 provider
+          #   ⚠ ddns-scripts-services 是 ddns-scripts 的硬依赖，不能整包剔除；
+          #     94 个 json 必然随包编入，靠运行期收敛服务商列表。
+          # ---------------------------------------------------------------
+          if grep -q '^CONFIG_PACKAGE_ddns-scripts=y' .config 2>/dev/null; then
+            for p in luci-app-lucky lucky luci-i18n-lucky-zh-cn; do
+              if grep -q "^CONFIG_PACKAGE_${p}=y" .config 2>/dev/null; then
+                echo "::error::DDNS 只留花生壳，但 ${p}=y 仍然存在（Lucky 是另一个 DDNS 客户端）"
+                exit 1
+              fi
+            done
+            if ! grep -q '^CONFIG_PACKAGE_ddns-scripts-services=y' .config 2>/dev/null; then
+              echo "::error::缺 ddns-scripts-services=y，oray.com.json 不会进固件（ddns-scripts 的硬依赖）"
+              exit 1
+            fi
+            if [ ! -f files/etc/config/ddns ]; then
+              echo "::error::缺 files/etc/config/ddns，花生壳示例配置没打进固件"
+              exit 1
+            fi
+            if ! grep -q "service_name 'oray.com'" files/etc/config/ddns; then
+              echo "::error::files/etc/config/ddns 里没有 service_name 'oray.com'，LuCI 选不到花生壳"
+              exit 1
+            fi
+            SVC_N=$(grep -c '^[[:space:]]*config service ' files/etc/config/ddns 2>/dev/null)
+            SVC_N=${SVC_N:-0}
+            if [ "$SVC_N" -ne 1 ]; then
+              echo "::error::files/etc/config/ddns 里有 $SVC_N 条 config service，只允许 oray 一条"
+              exit 1
+            fi
+            DDNS_SCRIPT="files/etc/uci-defaults/99-zz-ddns-only-oray"
+            if [ ! -f "$DDNS_SCRIPT" ]; then
+              echo "::error::缺 $DDNS_SCRIPT，其它 93 个 DDNS 服务商不会被剔除"
+              exit 1
+            fi
+            if ! grep -q 'KEEP="oray.com.json"' "$DDNS_SCRIPT"; then
+              echo "::error::$DDNS_SCRIPT 没有保留 oray.com.json 的逻辑"
+              exit 1
+            fi
+            echo "✅ DDNS 只留花生壳：Lucky 已移除，出厂仅 oray 一条，首启清掉其余 93 个 provider"
           fi
 
       - name: Apply device profile
@@ -818,6 +1008,9 @@ jobs:
 
           # 状态插件校验：第三方包缺失时 =y 被当无效符号删掉，界面里就少菜单
           OPT_MISS=""
+          # ★ 用户复核：组播双代理都保留，luci-app-igmpproxy 恢复进硬校验。
+          #   不放进来的话 defconfig 静默剔除时不会报错，LuCI 少一张配置页
+          #   且日志里查不到原因（这就是上一版的「错误日志」之一）。
           for p in luci-app-airoha-npu luci-app-pon-status luci-app-natmode luci-app-igmpproxy; do
             if ! grep -q "^CONFIG_PACKAGE_${p}=y" .config; then
               OPT_MISS="$OPT_MISS $p"
@@ -838,19 +1031,26 @@ jobs:
           fi
           echo "✅ 状态插件校验通过"
 
-          # naoki66/luci-app-airoha feed：只警告不阻断（这几个包不进索引时
-          # 编译照样能过，只是固件里少菜单，别让「编译成功」骗过去）
-          AIROHA_MISS=""
-          for p in luci-app-airoha-factory luci-app-airoha-recovery luci-app-clients luci-app-netmode; do
-            if ! grep -q "^CONFIG_PACKAGE_${p}=y" .config; then
-              AIROHA_MISS="$AIROHA_MISS $p"
+          # naoki66/luci-app-airoha feed【本版已移除】
+          #   用户要求「luci-app-airoha 也不要了，只要 ONU 就行」，
+          #   ADD_AIROHA_FEED=false + 两份 config 8 行 is not set。
+          #   这里改成条件式：只有配置里又出现 =y（将来恢复）才核对，
+          #   否则安静打印一行，不再发误导性 warning。
+          if grep -q '^CONFIG_PACKAGE_luci-app-airoha-factory=y' .config; then
+            AIROHA_MISS=""
+            for p in luci-app-airoha-factory luci-app-airoha-recovery luci-app-clients luci-app-netmode; do
+              if ! grep -q "^CONFIG_PACKAGE_${p}=y" .config; then
+                AIROHA_MISS="$AIROHA_MISS $p"
+              fi
+            done
+            if [ -n "$AIROHA_MISS" ]; then
+              echo "::warning::Airoha feed 的包没进 .config:$AIROHA_MISS"
+              echo "        查 diy-part1.sh 的 ADD_AIROHA_* 开关和 package/custom 下对应目录"
+            else
+              echo "✅ Airoha feed 4 个 LuCI 包均已启用"
             fi
-          done
-          if [ -n "$AIROHA_MISS" ]; then
-            echo "::warning::Airoha feed 的包没进 .config:$AIROHA_MISS"
-            echo "        查 diy-part1.sh 的 ADD_AIROHA_* 开关和 package/custom 下对应目录"
           else
-            echo "✅ Airoha feed 4 个 LuCI 包均已启用"
+            echo "ℹ Airoha feed 已移除（光猫管理只保留 luci-app-onu），跳过 4 包核对"
           fi
 
           # 面板 LED 插件只在 AN4475-G2 启用：15 颗灯的映射是这块板 PCA9555 的
@@ -1054,15 +1254,18 @@ jobs:
             grep -qx "CONFIG_PACKAGE_${p}=y" .config || PROXY_MISS="$PROXY_MISS $p"
           done
           if [ -n "$PROXY_MISS" ]; then
-            echo "::warning::以下插件没进 .config:$PROXY_MISS（固件里不会有，源码和索引都是好的）"
-            echo "        改 configs/${PROFILE}.config：写成 CONFIG_PACKAGE_<名>=y，行首不要带 #"
+            # ★ 错误日志修复：旧文案「固件里不会有，源码和索引都是好的」自相矛盾
+            #   —— 既然 =y 缺失就确实不会编进固件，不该说「都是好的」让人忽略。
+            echo "::warning::以下代理相关包未选中 =y:$PROXY_MISS → 本机型固件不会包含，PassWall 功能不完整"
+            echo "        原因：profile=<机型> 时 configs/<SoC>.config 不参与，只认 configs/${PROFILE}.config"
+            echo "        修法：在 configs/${PROFILE}.config 写 CONFIG_PACKAGE_<名>=y（行首不要带 #）"
           else
             echo "✅ 代理插件校验通过（passwall / xray / sing-box 均为 =y）"
           fi
 
           # 中文包（po 注入后才存在，缺失只警告不阻断）
           if ! grep -q "^CONFIG_PACKAGE_luci-i18n-airoha-npu-zh-cn=y" .config; then
-            echo "::warning::luci-i18n-airoha-npu-zh-cn 未启用（po/zh_Hans 未注入？界面将为英文）"
+            echo "::warning::luci-i18n-airoha-npu-zh-cn 未启用（po/zh_Hans 未注入？仅该页面为英文，其余 13 个中文包不受影响）"
           fi
 
           # 加密可选包复核（只警告）：源码树里没有的包会被 defconfig 静默删掉，
@@ -1781,6 +1984,57 @@ jobs:
           name: OpenWrt_firmware_${{ env.DEVICE_NAME }}${{ env.FILE_DATE }}
           path: ${{ env.FIRMWARE }}
 
+      # ---------------------------------------------------------------
+      # 固件压缩（2026-11-23）：80+ MB 的 .itb 打成一个 .tar.zst 再发 Release
+      #   · Artifact 上一步已上传完毕，里面仍是原始裸固件，调试/owut 不受影响
+      #   · Release 只传压缩包 + manifest/json/sha256sums（见下方 files 列表）
+      #   · UBI/FIT 镜像尾部有大量 0xFF padding，zstd -19 压缩率很高
+      #   · 解压：tar -I zstd -xf <名字>.tar.zst  → 得到原始 .itb 再刷
+      # ---------------------------------------------------------------
+      - name: Compress firmware for release
+        id: compress
+        if: steps.organize.outputs.status == 'success' && env.UPLOAD_RELEASE == 'true'
+        run: |
+          cd "$FIRMWARE"
+
+          # 用数组：stamp 后的文件名带 (Shanghai) 括号，普通字符串拼接会踩 word splitting
+          IMAGES=()
+          for f in *.itb *.bin *.ubi *.img *.fit *.trx; do
+            [ -f "$f" ] && IMAGES+=("$f")
+          done
+          if [ "${#IMAGES[@]}" -eq 0 ]; then
+            echo "::warning::没找到刷机镜像，跳过压缩"
+            echo "status=skipped" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          BEFORE=0
+          for f in "${IMAGES[@]}"; do BEFORE=$((BEFORE + $(stat -c %s "$f"))); done
+          echo "  打包镜像: ${IMAGES[*]}"
+
+          ARCHIVE="ponwrt-${PROFILE}-firmware.tar.zst"
+          if command -v zstd >/dev/null 2>&1; then
+            tar -I 'zstd -19 -T0 -q' -cf "$ARCHIVE" "${IMAGES[@]}"
+          else
+            echo "::warning::runner 没有 zstd，回退 gzip（体积略大）"
+            ARCHIVE="ponwrt-${PROFILE}-firmware.tar.gz"
+            tar -czf "$ARCHIVE" "${IMAGES[@]}"
+          fi
+
+          AFTER=$(stat -c %s "$ARCHIVE")
+          echo "  压缩前合计: $BEFORE B ($((BEFORE/1024/1024)) MiB)"
+          echo "  压缩包: $ARCHIVE → $AFTER B ($((AFTER/1024/1024)) MiB)"
+          if [ "$BEFORE" -gt 0 ]; then
+            echo "  节省: $(( (BEFORE-AFTER)*100/BEFORE ))%"
+            echo "  固件压缩节省 $(( (BEFORE-AFTER)*100/BEFORE ))% ($((BEFORE/1024/1024)) → $((AFTER/1024/1024)) MiB)" >> "$GITHUB_STEP_SUMMARY"
+          fi
+
+          # stamp 步骤算过一次 sha256sums，现在多了压缩包，重算一遍
+          rm -f sha256sums
+          sha256sum * > sha256sums 2>/dev/null || true
+          echo "status=success" >> "$GITHUB_OUTPUT"
+          echo "archive=${ARCHIVE}" >> "$GITHUB_OUTPUT"
+
       - name: Generate release tag and notes
         id: tag
         if: env.UPLOAD_RELEASE == 'true' && steps.compile.outputs.status == 'success'
@@ -1829,7 +2083,9 @@ jobs:
           echo "dev_cn=${DEV_CN}" >> "$GITHUB_OUTPUT"
 
           # ---------- 主固件名 ----------
-          MAIN_FW="$(cd "$FIRMWARE" && ls -1 *-squashfs-sysupgrade*.itb 2>/dev/null | head -1)"
+          # Release 主文件是压缩包（.tar.zst / .tar.gz）；找不到就回退裸 .itb
+          MAIN_FW="$(cd "$FIRMWARE" && ls -1 *.tar.zst *.tar.gz 2>/dev/null | head -1)"
+          [ -z "$MAIN_FW" ] && MAIN_FW="$(cd "$FIRMWARE" && ls -1 *-squashfs-sysupgrade*.itb 2>/dev/null | head -1)"
           [ -z "$MAIN_FW" ] && MAIN_FW="$(cd "$FIRMWARE" && ls -1 | head -1)"
           echo "main_fw=${MAIN_FW}" >> "$GITHUB_OUTPUT"
 
@@ -1871,11 +2127,12 @@ jobs:
             echo "| 时区 | Asia/Shanghai（UTC+8） |"
             echo "| IPv6 | **关闭**（内核 + RA/DHCPv6/ULA/wan6 全关） |"
             echo "| 内网 NTP | 本机 \`192.168.1.1:123\`，DHCP option 42 自动下发 |"
-            echo "| DNS | dnsmasq 缓存 10000，上游 \`223.5.5.5\` / \`119.29.29.29\` / \`114.114.114.114\` |"
+            echo "| DNS | **PassWall 独占**：dns_shunt=chinadns-ng + dns_redirect=1，53 由 PassWall 接管；SmartDNS 已移除，系统 dnsmasq 不配上游（只留 DHCP/缓存） |"
             echo "| 默认主题 | ARGON |"
             echo "| 界面语言 | 简体中文 |"
             echo ""
             echo "> 以上由 \`files/etc/uci-defaults/99-z-custom-defaults\` 在**首次开机**写入；"
+            echo "> DNS 段随后被 \`99-zz-passwall-dns\` 清空上游并交给 PassWall。"
             echo "> 编译期另在 \`configs/*.config\` 关掉 IPv6 内核栈与 odhcp6c/odhcpd。"
             echo "> ⚠ 跨版本 sysupgrade **不要勾「保留配置」**：旧 \`/etc/shadow\` 会盖掉 "
             echo "> \`root/admin\`，旧 \`/etc/config/*\` 会盖掉 DNS/NTP/IPv6 设置。"
@@ -1886,6 +2143,19 @@ jobs:
             echo '```'
             (cd "$FIRMWARE" && ls -1)
             echo '```'
+            echo ""
+            echo "> **固件已压缩**：Release 附件只有一个 \`ponwrt-*-firmware.tar.zst\`（或 \`.tar.gz\`）。"
+            echo "> 裸 \`.itb\` / \`.bin\` 不传 Release，在本次 run 的 **Artifacts** 里保留，供 owut / 调试用。"
+            echo ""
+            echo "解压（任选其一）："
+            echo ""
+            echo '```bash'
+            echo "tar -I zstd -xf ponwrt-${PROFILE}-firmware.tar.zst   # .tar.zst"
+            echo "# 或：tar -xzf ponwrt-${PROFILE}-firmware.tar.gz     # 回退的 .tar.gz"
+            echo '```'
+            echo ""
+            echo "解压得到的 \`*-squashfs-sysupgrade.itb\` 直接用 LuCI「系统 → 备份/升级」刷；"
+            echo "**跨版本 sysupgrade 不要勾「保留配置」**。"
             echo ""
             echo "## 四、校验值（SHA256）"
             echo ""
@@ -1917,17 +2187,20 @@ jobs:
           make_latest: true
           # 不同机型产物后缀不同，缺哪种都别让这一步失败
           fail_on_unmatched_files: false
+          # ⚠ 只传压缩包 + 元数据：裸 .itb/.bin/.ubi 80+ MB，已在 Artifact 里。
+          #   想恢复「Release 直接放裸固件」，把下面注释掉的几行加回来即可。
           files: |
-            ${{ env.FIRMWARE }}/*.bin
-            ${{ env.FIRMWARE }}/*.ubi
-            ${{ env.FIRMWARE }}/*.img
-            ${{ env.FIRMWARE }}/*.img.gz
-            ${{ env.FIRMWARE }}/*.itb
-            ${{ env.FIRMWARE }}/*.fit
-            ${{ env.FIRMWARE }}/*.trx
+            ${{ env.FIRMWARE }}/*.tar.zst
             ${{ env.FIRMWARE }}/*.tar.gz
             ${{ env.FIRMWARE }}/*.manifest
             ${{ env.FIRMWARE }}/*.json
+            ${{ env.FIRMWARE }}/sha256sums
+          # ${{ env.FIRMWARE }}/*.bin
+          # ${{ env.FIRMWARE }}/*.ubi
+          # ${{ env.FIRMWARE }}/*.img
+          # ${{ env.FIRMWARE }}/*.itb
+          # ${{ env.FIRMWARE }}/*.fit
+          # ${{ env.FIRMWARE }}/*.trx
 
       - name: Append to repository release log
         # 往仓库 RELEASES.md 追加一行；push/API 写文件不触发本 workflow
