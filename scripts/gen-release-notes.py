@@ -65,8 +65,8 @@ checks = [
      'RTP/UDP/RTSP → HTTP 流，FCC 毫秒级换台，带 LuCI 界面与简体中文'),
     ('DDNS 仅花生壳', 'ddns-scripts-services' in sel and 'lucky' not in sel,
      'Lucky 整组已移除；出厂仅一条 oray 配置，首启清掉其余 93 个 provider，LuCI 下拉只剩 oray.com'),
-    ('编译期精简 + 发布压缩', on('CONFIG_STRIP_KERNEL_EXPORTS') and on('CONFIG_USE_MKLIBS'),
-     'squashfs block 1024 KiB / strip 内核导出符号 / mklibs；Release 附件另打成 .tar.zst'),
+    ('编译期精简 + 发布压缩', on('CONFIG_STRIP_KERNEL_EXPORTS') and not on('CONFIG_USE_MKLIBS'),
+     'squashfs block 1024 KiB / strip 内核导出符号；mklibs 已禁用（apk+musl 下找不到 libc.so，会让 package/install 失败）；Release 附件另打成 .tar.zst'),
     ('组播双代理 + IGMP Snooping',
      'omcproxy' in sel and 'igmpproxy' in sel and 'luci-app-igmpproxy' in sel
      and 'fastnet' in sel and 'homebox' not in sel,

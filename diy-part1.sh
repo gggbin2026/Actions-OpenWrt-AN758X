@@ -1274,4 +1274,98 @@ if [ -n "$(ls -A "$PKG_DIR" 2>/dev/null)" ]; then
 else
   echo "未启用任何第三方插件"
 fi
+# =====================================================================
+# ★ 2026-11-23 第 3 次编译失败根治（run 45120205156 / #28）
+#
+#   日志里两条红色 annotation 并不是致命错误，但会误导定位、且是真实隐患：
+#     13422/13471  ./etc/init.d/pon: line 7: /usr/share/libubox/jshn.sh: No such file or directory
+#     13431/13468  /usr/share/passwall/utils.sh: line 34: /lib/functions/network.sh: No such file or directory
+#   package/install 装配 root-airoha 时会在 INSTROOT 环境里执行各包 init.d 的
+#   **顶层**（/etc/rc.common 此时不存在，shebang 被当注释忽略）。脚本顶层的
+#   `. /绝对路径` 在 dash/busybox ash 里是 special builtin：文件找不到会让
+#   非交互 shell **直接退出**（实测 `. /nonexistent; echo x` rc=2、echo 不执行，
+#   连 `. /nonexistent || :` 都拦不住），于是 postinst/enable 报非 0。
+#
+#   这两条本身没让 make 停（后面 Enabling 继续走完），但：
+#     ① 被放宽的失败定位正则抓成 ::error::，首屏 6 errors 有 1 条是假的；
+#     ② 上游随时可能再加一个同类顶层 source，又是一轮 1.5 小时。
+#
+#   通用修法：扫描 package/custom 下所有 shell 脚本，把裸的绝对路径 source
+#   改成 `[ -f PATH ] && . PATH || :`。运行时文件一定存在 → 行为完全不变；
+#   构建期文件不存在 → 短路跳过、整行 rc=0，不再退出。
+#   幂等（已有 [ -f 的行跳过），按内容匹配不锁行号，最后硬校验兜底。
+#   覆盖：airoha-ponctl/files/pon.init、luci-app-passwall/root/usr/share/
+#   passwall/utils.sh、以及以后上游新增的任何 init.d / .sh / .init。
+# =====================================================================
+if [ -d "$PKG_DIR" ]; then
+  python3 - "$PKG_DIR" <<'PYINITD'
+import os, re, sys
+root = sys.argv[1]
+pat = re.compile(r'^(\s*)(?:\.\s+|source\s+)(/[^\s]+)(.*)$')
+
+def is_shell(p, s, fn):
+    return (s.startswith('#!/bin/sh') or s.startswith('#!/bin/bash')
+            or fn.endswith('.sh') or fn.endswith('.init')
+            or '/init.d/' in p or '/uci-defaults/' in p)
+
+def read(p):
+    try:
+        return open(p, encoding='utf-8').read()
+    except (UnicodeDecodeError, OSError):
+        return None
+
+changed = []
+for dirpath, dirnames, filenames in os.walk(root):
+    for fn in filenames:
+        p = os.path.join(dirpath, fn)
+        s = read(p)
+        if s is None or not is_shell(p, s, fn):
+            continue
+        lines = s.splitlines(True)
+        out, n = [], 0
+        for l in lines:
+            m = pat.match(l.rstrip('\n'))
+            if m and '[ -f ' not in l and not l.lstrip().startswith('#'):
+                indent, path, rest = m.group(1), m.group(2), m.group(3)
+                if rest.strip() and not rest.strip().startswith('#'):
+                    out.append(l); continue
+                out.append('%s[ -f %s ] && . %s || :%s\n' % (indent, path, path, rest))
+                n += 1
+            else:
+                out.append(l)
+        if n:
+            open(p, 'w', encoding='utf-8', newline='\n').writelines(out)
+            changed.append((os.path.relpath(p, root), n))
+
+for rel, n in sorted(changed):
+    print('  ✅ init.d 顶层 source 容错化: %s (%d 处)' % (rel, n))
+print('  ℹ 共处理 %d 个文件' % len(changed))
+
+left = []
+for dirpath, dirnames, filenames in os.walk(root):
+    for fn in filenames:
+        p = os.path.join(dirpath, fn)
+        s = read(p)
+        if s is None or not is_shell(p, s, fn):
+            continue
+        for l in s.splitlines():
+            m = pat.match(l)
+            if m and '[ -f ' not in l and not l.lstrip().startswith('#'):
+                rs = m.group(3).strip()
+                if rs and not rs.startswith('#'):
+                    continue
+                left.append(os.path.relpath(p, root) + ' -> ' + l.strip()[:70])
+if left:
+    print('::error::以下脚本顶层仍有裸绝对路径 source，构建期 enable 会让非交互 sh 直接退出：' + ' | '.join(left[:4]))
+    sys.exit(1)
+print('✅ 构建期 init.d 顶层 source 全量检查通过')
+PYINITD
+  if [ $? -ne 0 ]; then
+    echo "::error::init.d 顶层 source 容错化失败，终止编译（不要等 1.5 小时后才挂）"
+    exit 1
+  fi
+else
+  echo "::warning::package/custom 不存在，跳过 init.d 顶层 source 检查"
+fi
+
 echo "🎉 diy-part1.sh 执行完毕"
