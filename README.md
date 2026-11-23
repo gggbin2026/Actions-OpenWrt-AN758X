@@ -17,7 +17,7 @@
 > | 测速 | 只留 `FastNet`（Homebox 移除） |
 > | 商店/主题 | iStore 移除（用 FastNet + apk 界面）；ARGON 主题 |
 > | 出厂默认 | `192.168.1.1` / `root` `admin`、Asia/Shanghai、内网 NTP + option 42、IPv6 关闭、5G WiFi CN/HE160 |
-> | 发布 | 每次按时间新建 Release `fw-<机型>-<时间戳>-r<run>a<attempt>`，**只保留最近 5 次**；固件打成 `.tar.zst` |
+> | 发布 | 每次按时间新建 Release `fw-<机型>-<时间戳>-r<run>a<attempt>`，**只保留最近 5 次**；**每个固件各自独立压缩成 `.itb.zst`**，说明页只列机型/默认配置/插件 |
 >
 > 完整清单见 `固件发布日志.md` / `插件冲突排查报告.md` / `上传与核对说明.md`。
 
@@ -191,7 +191,7 @@ golang 和 rust 每轮都在从源码自举。
 | 通道 | 介质 | 特点 |
 |---|---|---|
 | ① 快通道 | `actions/cache` | 秒级，但 **7 天无访问即回收** |
-| ② 备份通道 | Release `cache-backup` 资产 | 慢（~1 GB），**永不过期** |
+| ② 备份通道 | ~~Release `cache-backup`~~ | **2026-11-23 默认关闭**：下载页不再出现缓存文件；靠 `cache-keepalive.yml` 每 3 天真实恢复保活快通道 |
 
 恢复 ①→②，保存时两条都写（② 失败只 warning）。key 规则：
 
@@ -275,7 +275,7 @@ openssl speed -evp chacha20-poly1305
 ## 已知限制
 
 - 只有 `scope=firmware` 且编译成功才发 Release；`toolchain-only` 不发，空固件目录会跳过。
-- Release 每次按上海时间新建独立 tag `fw-<机型>-<YYYYMMDD-HHMMSS>-r<run>a<attempt>`，**只保留最近 5 次**（只删 `fw-` 前缀，`cache-backup` 不动）；固件附件打成 `.tar.zst`，裸 `.itb` 只在 Artifact。
+- Release 每次按上海时间新建独立 tag `fw-<机型>-<YYYYMMDD-HHMMSS>-r<run>a<attempt>`，**只保留最近 5 次**（只删 `fw-` 前缀）；固件**一个镜像一个独立 `.itb.zst`**，裸 `.itb` / buildinfo 只在 Artifact；`cache-backup` 已默认关闭并自动清理，不再出现在下载页。
 - NPU 只在三层路由模式生效，纯 AP 桥接时整机吞吐会掉到 2000 Mbps 左右。
 - `repository_dispatch` 触发时所有 choice 输入都是空，走 env 回退值：`PROFILE=fiberhome_hg5585f-ct`、`SOC=an7581`、`scope=firmware`。
 - 网页上传会把 `.sh` / uci-defaults 存成 `100644`（丢执行位）；`build-ponwrt.yml` 在编译前统一 `chmod +x`，走 CI 不受影响，脱离 CI 手动打包才需要自己补。
