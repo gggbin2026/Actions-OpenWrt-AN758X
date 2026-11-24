@@ -725,8 +725,9 @@ jobs:
           #   多次（前面 =y、后面 "# ... is not set"）。只判断「是否存在 =y」会
           #   把已被关掉的旧包误判为启用。改取该符号的**最后一次有效赋值**。
           DUP_ON=""
-          for p in homebox luci-app-homebox luci-i18n-homebox-zh-cn \
-                   lucky luci-app-lucky luci-i18n-lucky-zh-cn \
+          # 2026-11-24：Homebox 三包已按用户要求恢复（=y），从禁用名单移除。
+          #   FastNet（外网/链路测速）与 Homebox（内网吞吐 :3300）测的不是同一段链路，不算重复。
+          for p in lucky luci-app-lucky luci-i18n-lucky-zh-cn \
                    luci-app-openclash luci-app-mosdns \
                    luci-app-tailscale luci-app-easytier luci-theme-fluent; do
             LAST=$(grep -E "^CONFIG_PACKAGE_${p}=(y|m)|^# CONFIG_PACKAGE_${p} is not set" .config 2>/dev/null | tail -1)
@@ -736,7 +737,7 @@ jobs:
           done
           if [ -n "$DUP_ON" ]; then
             echo "::error::插件去重校验失败，以下已剔除项又被启用:$DUP_ON"
-            echo "  测速只留 FastNet、DDNS 只留花生壳、代理只留 PassWall；组播代理 omcproxy + igmpproxy 两个都保留"
+            echo "  DDNS 只留花生壳、代理只留 PassWall；组播代理 omcproxy + igmpproxy 两个都保留；FastNet + Homebox 并存"
             exit 1
           fi
           # 必留项反查：组播双代理 + 唯一测速
@@ -747,7 +748,7 @@ jobs:
               *) echo "::error::必留插件 ${p}=y 不见了（最后赋值: ${LAST:-无}），检查 configs/*.config（组播双代理是用户明确要求保留的）"; exit 1 ;;
             esac
           done
-          echo "✅ 插件去重校验通过：组播=omcproxy+igmpproxy（双代理并存）/ 测速=FastNet / DDNS=花生壳 / 代理=PassWall"
+          echo "✅ 插件去重校验通过：组播=omcproxy+igmpproxy / 测速=FastNet+Homebox / DDNS=花生壳 / 代理=PassWall"
 
           # ---------------------------------------------------------------
           # ★ IGMP Snooping 硬校验（2026-11-23 新增）
@@ -777,6 +778,68 @@ jobs:
           echo "✅ IGMP Snooping 首启脚本齐备（UCI bridge igmp_snooping=1 + sysfs 兜底）"
 
           # ---------------------------------------------------------------
+          # DHCP Snooping 硬校验（2026-11-24）——防私设 DHCP，尤其无线端
+          #   实现：独立 nftables `bridge` 表，在 br-lan 的 prerouting 丢弃
+          #   任何「从桥端口进入」的 BOOTP 服务端响应（udp 67 → 68）。
+          #   br-lan 里既有有线 LAN 口也有 WiFi 的 phy*-ap*，所以无线客户端
+          #   私开 DHCP 一样被挡；本机 dnsmasq 的响应走 local output，不进
+          #   prerouting，不会误杀。
+          #   include 用 position=ruleset-pre，fw4 reload 时随 ruleset 重放，
+          #   nft 文件里 `table` + `flush table` 防重复定义。
+          # ---------------------------------------------------------------
+          DHCP_NFT="files/etc/rogue-dhcp.nft"
+          DHCP_UCID="files/etc/uci-defaults/99-zz-dhcp-snooping"
+          for f in "$DHCP_NFT" "$DHCP_UCID"; do
+            if [ ! -f "$f" ]; then
+              echo "::error::缺 $f：DHCP Snooping 不会生效，私设 DHCP 仍会污染整个 LAN/WiFi"
+              exit 1
+            fi
+          done
+          for kw in 'table bridge rogue_dhcp' 'udp sport 67' 'udp dport 68' 'flush table bridge rogue_dhcp'; do
+            if ! grep -qF "$kw" "$DHCP_NFT"; then
+              echo "::error::$DHCP_NFT 缺少关键规则: $kw"
+              exit 1
+            fi
+          done
+          for kw in "position='ruleset-pre'" "type='nftables'" 'rogue-dhcp.nft'; do
+            if ! grep -qF "$kw" "$DHCP_UCID"; then
+              echo "::error::$DHCP_UCID 缺少 include 配置: $kw"
+              exit 1
+            fi
+          done
+          if grep -qE 'echo "::(warning|error)::' "$DHCP_UCID"; then
+            echo "::error::$DHCP_UCID 里出现 GitHub 注解式输出（在路由器上会变成错误日志），请改用 logger"
+            exit 1
+          fi
+          echo "✅ DHCP Snooping 齐备：br-lan 桥层丢弃私设 DHCP 响应（含有线 LAN 与 WiFi 桥端口）"
+
+          # ---------------------------------------------------------------
+          # Homebox 三件套硬校验（2026-11-24 恢复）
+          #   用户之前遇到过 "The Homebox service is not running"：
+          #   v1.0.1 是 Rust 版，启动必须带 `serve` 子命令；老 init 裸跑
+          #   /usr/bin/homebox 只会打印帮助立刻退出 → procd 反复 respawn。
+          #   三件套缺任一，菜单在、服务起不来，等于白装。
+          # ---------------------------------------------------------------
+          if grep -q '^CONFIG_PACKAGE_luci-app-homebox=y' .config 2>/dev/null; then
+            for f in files/etc/config/homebox files/etc/init.d/homebox \
+                     files/etc/uci-defaults/99-zz-homebox; do
+              if [ ! -f "$f" ]; then
+                echo "::error::缺 $f：Homebox 界面会在，但服务不自启 / 菜单不显示"
+                exit 1
+              fi
+            done
+            if ! grep -q "enabled '1'" files/etc/config/homebox; then
+              echo "::error::files/etc/config/homebox 没开 enabled=1，Homebox 不会自启"
+              exit 1
+            fi
+            if ! grep -q 'serve --host' files/etc/init.d/homebox; then
+              echo "::error::files/etc/init.d/homebox 缺少 serve 子命令自适应（v1.0.1 Rust 版裸跑会立刻退出）"
+              exit 1
+            fi
+            echo "✅ Homebox 三件套齐备：默认自启 :3300（serve 子命令自适应）"
+          fi
+
+          # ---------------------------------------------------------------
           # DNS 架构硬校验（2026-11-23）——「剔除系统 DNS，只要 PassWall」
           #   本版 SmartDNS 整组退出，DNS 由 PassWall 独占：
           #     LAN → PassWall dnsmasq(53) → chinadns-ng → 国内直连 / 国外远端
@@ -787,8 +850,26 @@ jobs:
           #   ⚠ dnsmasq-full 必须保留：LAN DHCP 靠它，PassWall LUCI_DEPENDS 也硬依赖。
           # ---------------------------------------------------------------
           if grep -q '^CONFIG_PACKAGE_luci-app-passwall=y' .config 2>/dev/null; then
-            if grep -q '^CONFIG_PACKAGE_smartdns=y' .config 2>/dev/null; then
-              echo "::error::smartdns 仍是 =y：本版 DNS 全交 PassWall，SmartDNS 三行必须 is not set"
+            # 2026-11-23 加固：原来只查 smartdns 本体一行。用户反馈「系统 DNS
+            # 插件还在」，把 LuCI 前端 / 中文包 / PassWall 的 INCLUDE_SmartDNS
+            # 三个符号一并查死（PassWall 的 INCLUDE_SmartDNS 默认是 y，最容易被
+            # defconfig 悄悄拉回来），并确认 files/ 下没有旧出厂配置残留。
+            for SYM in smartdns luci-app-smartdns luci-i18n-smartdns-zh-cn \
+                       luci-app-passwall_INCLUDE_SmartDNS; do
+              if grep -q "^CONFIG_PACKAGE_${SYM}=y" .config 2>/dev/null; then
+                echo "::error::${SYM} 仍是 =y：本版 DNS 全交 PassWall，SmartDNS 整组必须 is not set"
+                exit 1
+              fi
+            done
+            for OLD in files/etc/config/smartdns \
+                       files/etc/uci-defaults/99-zz-smartdns; do
+              if [ -f "$OLD" ]; then
+                echo "::error::$OLD 还在：会把 SmartDNS 配置写回固件，与 PassWall 独占冲突，请删除"
+                exit 1
+              fi
+            done
+            if [ ! -f files/etc/uci-defaults/99-zz-dns-cleanup ]; then
+              echo "::error::缺 99-zz-dns-cleanup：旧 overlay 里的 SmartDNS 菜单/缓存无法自愈"
               exit 1
             fi
             if ! grep -q '^CONFIG_PACKAGE_chinadns-ng=y' .config 2>/dev/null; then
@@ -812,7 +893,7 @@ jobs:
               echo "::error::$PW_DNS 没设 dns_redirect=1，PassWall 不会接管 53"
               exit 1
             fi
-            echo "✅ DNS = PassWall 独占（chinadns-ng + dns_redirect=1）；SmartDNS 已剔除，dnsmasq 只留 DHCP/缓存"
+            echo "✅ DNS = PassWall 独占；SmartDNS 本体/LuCI/中文包/INCLUDE 四符号全非 y；dnsmasq 只留 DHCP/缓存"
           fi
 
           # ---------------------------------------------------------------
@@ -1934,19 +2015,18 @@ jobs:
           echo "FIRMWARE=$PWD" >> "$GITHUB_ENV"
           echo "status=success" >> "$GITHUB_OUTPUT"
 
-      # 只给主固件加时间戳：<名>-2026-11-13_133226(Shanghai).itb。
-      # 冒号会让 upload-artifact 整包失败；其余产物保持原名，刷机脚本/文档引用的名字不用动。
+      # 只给主固件加日期：<名>-20261124-0743.itb.zst（上海时间，短格式）。
+      # 2026-11-24 改：旧格式 2026-11-23_174912(Shanghai) 太长、带括号，
+      # 用户反馈「名字加日期不方便」→ 改成 8 位日期 + 4 位时分，仍带日期、无冒号括号。
+      # 其余产物保持原名；刷机脚本/文档引用的名字不用动。
       - name: Stamp firmware filenames with build time
         id: stamp
         if: steps.organize.outputs.status == 'success' && env.FW_TS_NAME == 'true'
         run: |
           cd "$FIRMWARE"
 
-          # 2026-11-13 13:32:26 → 2026-11-13_133226(Shanghai)
-          NOW=$(date '+%Y-%m-%d %H:%M:%S')
-          DATE_PART=${NOW%% *}
-          TIME_PART=${NOW#* }
-          TS="${DATE_PART}_${TIME_PART//:/}(Shanghai)"
+          # 2026-11-24 07:43:12 → 20261124-0743（Asia/Shanghai，env.TZ 已设）
+          TS="$(date '+%Y%m%d-%H%M')"
 
           echo "FW_TS=${TS}" >> "$GITHUB_ENV"
           echo "本次文件名时间戳: ${TS}"
@@ -1957,7 +2037,7 @@ jobs:
             [ -f "$f" ] || continue
             # 幂等护栏：已经带时间戳的直接跳过，别叠加成 -TS-TS
             case "$f" in
-              *-[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]_[0-9][0-9][0-9][0-9][0-9][0-9]*) already=$((already + 1)); continue ;;
+              *-[0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9]-[0-9][0-9][0-9][0-9]*) already=$((already + 1)); continue ;;
             esac
             NEW="${f%.itb}-${TS}.itb"
             if [ -e "$NEW" ]; then
@@ -2116,7 +2196,7 @@ jobs:
 
           if [ -n "${FW_TS:-}" ]; then
             BUILD_TIME=$(printf '%s' "$FW_TS" | sed -E \
-              's/^([0-9]{4}-[0-9]{2}-[0-9]{2})_([0-9]{2})([0-9]{2})([0-9]{2})\(Shanghai\)$/\1 \2:\3:\4 (Shanghai)/')
+              's/^([0-9]{4})([0-9]{2})([0-9]{2})-([0-9]{2})([0-9]{2})$/\1-\2-\3 \4:\5 (Shanghai)/')
           else
             BUILD_TIME="$(date '+%Y-%m-%d %H:%M:%S') (Shanghai)"
           fi
@@ -2161,6 +2241,8 @@ jobs:
           {
             echo "# ${DEV_CN} · ${BUILD_TIME}"
             echo ""
+            echo "> 固件文件名末段 \`YYYYMMDD-HHMM\` 即编译日期（上海时间）；Release tag 与下表「编译时间」同义。"
+            echo ""
             echo "| 项目 | 内容 |"
             echo "|------|------|"
             echo "| 适用光猫 | **${DEV_CN}** |"
@@ -2181,9 +2263,15 @@ jobs:
             echo "| IPv6 | 关闭 |"
             echo "| 内网 NTP | \`192.168.1.1:123\`，DHCP option 42 下发 |"
             echo "| DNS | PassWall 独占（chinadns-ng 分流）；SmartDNS 已移除 |"
+            echo "| 系统 DNS 服务 | **仅 \`dnsmasq\`**：只发 DHCP + 缓存，不配任何上游。**不是 DNS 插件**，删了 LAN 拿不到 IP、PassWall 也起不来 |"
             echo "| 主题 / 语言 | ARGON / 简体中文 |"
+            echo "| DHCP Snooping | **已启用**：br-lan 桥层（含有线 LAN 与 WiFi）丢弃私设 DHCP 的 OFFER/ACK，本机 dnsmasq 不受影响 |"
+            echo "| Homebox 内网测速 | **默认自启** \`http://192.168.1.1:3300\`（LuCI「服务 → Homebox」） |"
             echo ""
             echo "> 跨版本 sysupgrade **不要勾「保留配置」**，否则旧配置会盖掉以上默认。"
+            echo "> 若 LuCI「服务」里仍出现 **SmartDNS** 条目，那是旧固件的配置/LuCI 缓存残留"
+            echo "> （不是本固件编入的插件）：不保留配置重刷，或 SSH 执行："
+            echo "> \`rm -f /etc/config/smartdns /etc/init.d/smartdns /etc/rc.d/*smartdns* /tmp/luci-indexcache*; /etc/init.d/rpcd restart\`"
             echo ""
             echo "## 下载与校验"
             echo ""
@@ -2192,6 +2280,8 @@ jobs:
             echo '```'
             echo ""
             echo "解压出的 \`*-squashfs-sysupgrade.itb\` 用 LuCI「系统 → 备份/升级」刷。"
+            echo "刷完 LuCI「服务 → Homebox」应显示运行中；浏览器开 \`http://192.168.1.1:3300\` 测内网吞吐。"
+            echo "DHCP Snooping 默认生效、无需配置；核对：\`nft list table bridge rogue_dhcp\`（见仓库 固件发布日志.md）。"
             echo "救砖用的 \`*-initramfs-recovery.itb\`、裸镜像与 buildinfo/profiles.json 均在本次 run 的 Artifact 里。"
             echo ""
             echo "SHA256（\`${MAIN_FW}\`）："
