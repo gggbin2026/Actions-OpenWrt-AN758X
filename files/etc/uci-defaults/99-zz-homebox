@@ -1,0 +1,41 @@
+#!/bin/sh
+# 99-zz-homebox —— 首次开机补齐 Homebox 出厂配置并设为自启
+# ---------------------------------------------------------------------------
+# sirpdboy/netspeedtest 的预编译版 Makefile 只装 /usr/bin/homebox，
+# 不带 /etc/config/homebox 与 /etc/init.d/homebox；而 luci-app-homebox
+# 的 controller 要求 /etc/config/homebox 存在才注册菜单，否则界面不出来。
+# 本仓库 files/ 已把这两个文件打进 rootfs，这里只做幂等兜底：
+#   · 配置已存在 → 不覆盖（保留用户改过的端口等）
+#   · 缺了 → 建一份 enabled=1 / :3300
+#   · 补执行位、enable 服务、清 LuCI 索引缓存
+# ---------------------------------------------------------------------------
+log() { logger -t homebox-init "$@"; }
+
+if [ ! -f /etc/config/homebox ]; then
+  mkdir -p /etc/config
+  cat > /etc/config/homebox <<'EOF'
+config homebox 'homebox'
+	option enabled '1'
+	option port '3300'
+	option logger '0'
+EOF
+  log "/etc/config/homebox 不存在，已建默认配置（enabled=1 / :3300）"
+else
+  log "/etc/config/homebox 已存在，保留用户配置不覆盖"
+fi
+
+chmod +x /etc/init.d/homebox 2>/dev/null || true
+
+if [ -x /etc/init.d/homebox ]; then
+  /etc/init.d/homebox enable 2>/dev/null || true
+  log "Homebox 已设为开机自启"
+else
+  log "警告：/etc/init.d/homebox 不存在（包未编入？），跳过 enable"
+fi
+
+# 清 LuCI 菜单缓存，避免旧索引里没有 Homebox 条目
+rm -f /tmp/luci-indexcache /tmp/luci-indexcache.* 2>/dev/null
+[ -d /tmp/luci-modulecache ] && rm -rf /tmp/luci-modulecache/* 2>/dev/null
+
+log "Homebox 出厂准备完成：http://192.168.1.1:3300"
+exit 0

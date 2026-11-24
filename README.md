@@ -12,12 +12,16 @@
 > |---|---|
 > | 光猫管理 | 只用 `luci-app-onu`（LOID / 认证 / IPTV / 语音 / 诊断）；Airoha feed 四页面与旧 PON 栈已移除 |
 > | 组播 | `omcproxy` + `igmpproxy` / `luci-app-igmpproxy` **双代理并存** + `rtp2httpd` v3.17.2；**IGMP Snooping 首启自动开启** |
-> | DNS | **PassWall 独占**：`dns_shunt=chinadns-ng` + `dns_redirect=1`；系统 dnsmasq 只留 DHCP/缓存，不配上游；SmartDNS 已整组移除 |
+> | DNS | **PassWall 独占**
+> **DHCP Snooping 默认开启**：`files/etc/rogue-dhcp.nft` 在 br-lan 桥层丢弃私设 DHCP 的 OFFER/ACK（含有线 LAN 与 WiFi 桥端口），本机 dnsmasq 不受影响，无需配置。核对 `nft list table bridge rogue_dhcp`；临时关闭 `uci set firewall.rogue_dhcp_include.enabled=0; uci commit firewall; fw4 reload`。
+> **Homebox**：默认自启 `http://192.168.1.1:3300`，LuCI「服务 → Homebox」；init.d 已适配 v1.0.1 的 `serve` 子命令。
+
+> 「网络 → DHCP/DNS」页面是 `dnsmasq`（仅 DHCP + 缓存，不配上游），属系统基础设施**不是 DNS 插件**，不能删；SmartDNS 整组已移除。若 LuCI 里仍出现「SmartDNS」菜单，是旧配置残留，重刷时不要勾「保留配置」或执行 `DNS_现机清理.sh`。：`dns_shunt=chinadns-ng` + `dns_redirect=1`；系统 dnsmasq 只留 DHCP/缓存，不配上游；SmartDNS 已整组移除 |
 > | DDNS | **只留花生壳 `oray.com`**：Lucky 移除，首启清掉其余 93 个 provider |
 > | 测速 | 只留 `FastNet`（Homebox 移除） |
 > | 商店/主题 | iStore 移除（用 FastNet + apk 界面）；ARGON 主题 |
 > | 出厂默认 | `192.168.1.1` / `root` `admin`、Asia/Shanghai、内网 NTP + option 42、IPv6 关闭、5G WiFi CN/HE160 |
-> | 发布 | 每次按时间新建 Release `fw-<机型>-<时间戳>-r<run>a<attempt>`，**只保留最近 5 次**；**每个固件各自独立压缩成 `.itb.zst`**，说明页只列机型/默认配置/插件 |
+> | 发布 | 固件文件名末段 `YYYYMMDD-HHMM` 为编译日期（上海时间）；每次按时间新建 Release `fw-<机型>-<时间戳>-r<run>a<attempt>`，**只保留最近 5 次**；**每个固件各自独立压缩成 `.itb.zst`**，说明页只列机型/默认配置/插件 |
 >
 > 完整清单见 `固件发布日志.md` / `插件冲突排查报告.md` / `上传与核对说明.md`。
 

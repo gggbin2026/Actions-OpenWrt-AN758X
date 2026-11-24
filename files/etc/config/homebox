@@ -1,0 +1,4 @@
+config homebox 'homebox'
+	option enabled '1'
+	option port '3300'
+	option logger '0'

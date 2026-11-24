@@ -1,0 +1,82 @@
+#!/bin/sh
+# 99-zz-dhcp-snooping —— 把 rogue-dhcp.nft 挂进 fw4，开机即生效
+# ---------------------------------------------------------------------------
+# 为什么必须走 fw4 的 include：独立 nftables 表不会被 OpenWrt 开机自动
+# 恢复，只在本次运行里存在。用 `config include type nftables
+# position ruleset-pre`，fw4 每次生成 ruleset（开机 / reload）都会把
+# /etc/rogue-dhcp.nft 拼到最前面，规则随防火墙生命周期自动重建。
+#   · ruleset-pre 在 fw4 的 `flush table inet fw4` 之前，互不干扰
+#   · nft 文件里 `table` + `flush table` 防重复定义
+#   · 不按接口名过滤 → 有线 LAN 与 WiFi 桥端口一视同仁
+#
+# ⚠ 安全检查：include 里的语法一旦被内核 nft 拒绝，fw4 会**整个
+#   ruleset 加载失败**（连 NAT 一起没了）。所以注册前先用 `nft -c`
+#   静态校验；不通就自动换成最简写法再试；仍不通就干脆不注册，
+#   保证防火墙本身一定能起来。
+# ---------------------------------------------------------------------------
+log() { logger -t dhcp-snooping "$@"; }
+
+NFT_FILE="/etc/rogue-dhcp.nft"
+if [ ! -f "$NFT_FILE" ]; then
+  log "错误：$NFT_FILE 不存在，DHCP Snooping 未启用"
+  exit 0
+fi
+
+# --- 1) nft 静态语法检查（去掉 table 声明 / flush，只校验规则块）-----------
+CHECK_OK=1
+if command -v nft >/dev/null 2>&1; then
+  TMP="$(mktemp)"
+  grep -v '^table bridge rogue_dhcp$' "$NFT_FILE" \
+    | grep -v '^flush table bridge rogue_dhcp$' > "$TMP"
+
+  if ! nft -c -f "$TMP" >/dev/null 2>&1; then
+    log "原版 nft 片段校验未通过，自动降级为最简写法（去掉 ether type ip / counter）"
+    cat > "$NFT_FILE" <<'EOF'
+table bridge rogue_dhcp
+flush table bridge rogue_dhcp
+table bridge rogue_dhcp {
+    chain prerouting {
+        type filter hook prerouting priority 0; policy accept;
+        udp sport 67 udp dport 68 drop
+    }
+}
+EOF
+    grep -v '^table bridge rogue_dhcp$' "$NFT_FILE" \
+      | grep -v '^flush table bridge rogue_dhcp$' > "$TMP"
+    if ! nft -c -f "$TMP" >/dev/null 2>&1; then
+      CHECK_OK=0
+      log "降级写法仍校验失败：跳过注册 include，保证防火墙能正常加载"
+    fi
+  fi
+  rm -f "$TMP"
+else
+  log "提示：本机无 nft 命令，跳过静态校验，交由 fw4 加载时判断"
+fi
+
+if [ "$CHECK_OK" != "1" ]; then
+  exit 0
+fi
+
+# --- 2) 注册 include（幂等：先删同名段再建，重复执行不会叠加）-------------
+uci -q delete firewall.rogue_dhcp_include 2>/dev/null || true
+uci set firewall.rogue_dhcp_include=include
+uci set firewall.rogue_dhcp_include.enabled='1'
+uci set firewall.rogue_dhcp_include.type='nftables'
+uci set firewall.rogue_dhcp_include.path='/etc/rogue-dhcp.nft'
+uci set firewall.rogue_dhcp_include.position='ruleset-pre'
+uci commit firewall
+log "已注册 fw4 include: position='ruleset-pre' type='nftables' path='$NFT_FILE'"
+
+# --- 3) 立即重载一次；首启时 firewall 未就绪会失败，但配置已 commit，
+#        下次开机 / 防火墙启动时自然会加载，不用重试，也不删 include -----
+if command -v fw4 >/dev/null 2>&1; then
+  if fw4 reload >/dev/null 2>&1; then
+    log "fw4 reload 完成，br-lan 桥层 DHCP Snooping 已生效（含有线 LAN 与 WiFi）"
+  else
+    log "提示：fw4 reload 此刻未成功（首启防火墙未就绪属正常），规则将在下次启动时加载"
+  fi
+else
+  log "提示：未找到 fw4 命令，规则将在下次防火墙启动时加载"
+fi
+
+exit 0

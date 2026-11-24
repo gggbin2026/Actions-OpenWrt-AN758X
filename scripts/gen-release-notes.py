@@ -39,6 +39,7 @@ groups = [
         'luci-app-accesscontrol-plus', 'luci-app-vantage',
         'luci-app-package-manager', 'luci-app-firewall',
         'luci-app-poweroffdevice', 'luci-app-owq-wol', 'luci-app-accesscontrol']),
+    ('内网测速', ['luci-app-homebox']),
     ('USB 打印', ['luci-app-usb-printer', 'luci-app-p910nd']),
     ('主题 / 包管理', [
         'luci-app-package-manager', 'luci-theme-argon', 'luci-theme-bootstrap',
@@ -62,7 +63,7 @@ if other:
 i18n = sorted(p for p in sel if p.startswith('luci-i18n-') and p.endswith('-zh-cn'))
 bodies = [
     'airoha-pond', 'airoha-ponctl', 'airoha-pon-debug', 'omcproxy', 'igmpproxy',
-    'p910nd', 'xray-core', 'sing-box', 'chinadns-ng', 'dns2socks', 'rtp2httpd',
+    'homebox', 'p910nd', 'xray-core', 'sing-box', 'chinadns-ng', 'dns2socks', 'rtp2httpd',
     'ddns-scripts', 'ddns-scripts-services', 'fastnet', 'linkease-app-entry',
     'ttyd', 'watchdog', 'bash', 'snmpd-nossl', 'kmod-usb-printer', 'curl',
 ]

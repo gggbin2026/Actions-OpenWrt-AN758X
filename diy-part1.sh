@@ -89,7 +89,7 @@ ADD_FASTNET=true       # ★ luci-app-fastnet + fastnet（LinEase/iStoreOS 生�
                        #   依赖 linkease-app-entry / luci-lib-linkeaseauth，见下方 fastnet 段
 ADD_DDNS=true          # ★ ddns-scripts + luci-app-ddns（官方 feeds 自带，无需 clone，只写 config）
 ADD_NFT_QOS=true       # ★ nft-qos + luci-app-nft-qos（官方 packages/luci feeds 自带，无需 clone，只写 config）
-ADD_HOMEBOX=false      # ★ 去重：与 FastNet 同属测速工具，只留 FastNet（用户明确点名要）
+ADD_HOMEBOX=true       # ★ 2026-11-24 用户要求恢复：Homebox 默认自启 :3300，三件套已回位
 ADD_VANTAGE=true       # ★ luci-app-vantage：实时网络仪表盘【一般插件，不是主题】+ 自带简体中文 po
 ADD_EASYTIER=false     # ★ 去重：与 Tailscale 同为异地组网，两者 config 都无 =y → 都关（省 Rust 编译）
 ADD_POWEROFF=true      # luci-app-poweroffdevice（关机）
@@ -563,9 +563,8 @@ if [ "$ADD_OPENLIST" = "true" ]; then
   clone https://github.com/sbwml/luci-app-openlist2 "$PKG_DIR/luci-app-openlist2" main
 fi
 
-# --- homebox（已停用：插件去重只留 FastNet）-----------------------------
-# ★ 2026-11-23：下面这段保留但 ADD_HOMEBOX=false，不会执行。
-#   保留源码便于三处回退（config 三行 =y + ADD_HOMEBOX=true + 恢复 files 三件套）。
+# --- homebox（2026-11-24 已恢复）-----------------------------------
+# 三处一起开：ADD_HOMEBOX=true + 两份 config 三行 =y + files/ 三件套。
 # ------------------------------------------------------------------------
 # --- homebox（浏览器内网测速 http://<路由IP>:3300）-----------------------
 # 两个包来自两个仓库，都只拷需要的子目录，避免和 feeds 里同名包冲突：
@@ -1205,9 +1204,9 @@ if [ -n "$(ls -A "$PKG_DIR" 2>/dev/null)" ]; then
   # ADD_SMARTDNS 已置 false；DNS 改由 PassWall 独占，无对应实体包需要校验
   # 定制增强：fastnet 四个包必须都进索引，否则 defconfig 会静默剔除 =y
   [ "$ADD_FASTNET"   = "true" ] && REQUIRED="$REQUIRED fastnet luci-app-fastnet linkease-app-entry luci-lib-linkeaseauth"
-  # ★ 插件去重：Homebox / OpenClash / MosDNS / Tailscale / EasyTier / Fluent
-  #   均已 ADD_*=false 且 config 无 =y，下面这些条件式校验自然跳过。
-  #   保留条件式是为了「三处一起改回」时能自动恢复，不用再补一行。
+  # ★ 2026-11-24：Homebox 已恢复（=y + ADD_HOMEBOX=true + files 三件套）。
+  #   OpenClash / MosDNS / Tailscale / EasyTier / Fluent 仍为 false，条件式校验跳过。
+  [ "$ADD_HOMEBOX"    = "true" ] && REQUIRED="$REQUIRED homebox luci-app-homebox"
   # 定制增强：只校验 app 本体；中文包 luci-i18n-vantage-zh-cn 由 luci.mk 按 po 动态生成，
   # 不在 package 目录里以独立目录出现，放进这里会误报「未进索引」。
   [ "$ADD_VANTAGE"   = "true" ] && REQUIRED="$REQUIRED luci-app-vantage"

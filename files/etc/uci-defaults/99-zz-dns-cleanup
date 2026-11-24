@@ -1,0 +1,47 @@
+#!/bin/sh
+# 99-zz-dns-cleanup —— 清除旧固件 overlay 里残留的 SmartDNS 痕迹
+# ------------------------------------------------------------------
+# 2026-11-23：用户反馈「系统 DNS 插件还在」。编译层面 SmartDNS 整组
+# （本体 / LuCI / 中文包 / PassWall INCLUDE_SmartDNS）已全部 is not set，
+# files/ 里也没有出厂配置，新固件不会编入这个包。
+# 但跨版本 sysupgrade 若勾了「保留配置」，overlay 会把旧固件的
+#   /etc/config/smartdns、/etc/init.d/smartdns、rc.d 链接、
+#   LuCI controller/菜单缓存 原样带过来 —— LuCI 里就还能看到「SmartDNS」。
+# 本脚本在首启执行一次，把这些残留清掉（幂等），**不动 dnsmasq**、
+# 不动 PassWall / chinadns-ng / dns2socks，不改任何 DNS 配置。
+# ------------------------------------------------------------------
+log() { logger -t dns-cleanup "$@"; }
+
+N=0
+for F in /etc/config/smartdns /etc/init.d/smartdns /etc/smartdns/smartdns.conf \
+         /usr/bin/smartdns /usr/sbin/smartdns; do
+  [ -e "$F" ] && { rm -f -- "$F" 2>/dev/null && N=$((N+1)); }
+done
+
+# 开机自启链接（procd 会尝试启动已删除的服务并刷错误日志）
+for F in /etc/rc.d/*smartdns*; do
+  [ -e "$F" ] && { rm -f -- "$F" 2>/dev/null && N=$((N+1)); }
+done
+
+# LuCI 菜单 / controller / 视图（旧 overlay 里可能有，新固件 squashfs 里没有）
+for D in /usr/lib/lua/luci/controller /usr/lib/lua/luci/model \
+         /usr/lib/lua/luci/view /usr/share/luci/menu.d /usr/share/luci/modals; do
+  [ -d "$D" ] || continue
+  find "$D" -maxdepth 4 -iname '*smartdns*' -type f -print 2>/dev/null | while read -r F; do
+    rm -f -- "$F" 2>/dev/null
+  done
+done
+
+# LuCI 索引 / 模块缓存（不清的话菜单会继续显示旧条目）
+rm -f /tmp/luci-indexcache /tmp/luci-indexcache.* 2>/dev/null
+[ -d /tmp/luci-modulecache ] && rm -rf /tmp/luci-modulecache/* 2>/dev/null
+
+# 只重启 rpcd 重建索引，不碰 uhttpd / 网络 / dnsmasq，不断网
+[ -x /etc/init.d/rpcd ] && /etc/init.d/rpcd restart >/dev/null 2>&1 || true
+
+if [ "$N" -gt 0 ]; then
+  log "已清除 ${N} 个旧 SmartDNS 残留（配置/init/rc.d）；dnsmasq 与 PassWall 未改动"
+else
+  log "无 SmartDNS 残留；已刷新 LuCI 索引缓存（dnsmasq 仅 DHCP/缓存，属正常系统服务）"
+fi
+exit 0

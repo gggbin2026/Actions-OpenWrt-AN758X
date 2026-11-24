@@ -1,0 +1,28 @@
+# /etc/rogue-dhcp.nft —— DHCP Snooping：拦截私设 DHCP 服务器
+# ---------------------------------------------------------------------------
+# 由 /etc/config/firewall 的 `config include ... position 'ruleset-pre'`
+# 在每次 fw4 reload / 开机启动时加载（见 99-zz-dhcp-snooping）。
+#
+# 原理：
+#   DHCP 客户端 → 服务器 : udp 68 → 67（DISCOVER / REQUEST，必须放行）
+#   DHCP 服务器 → 客户端 : udp 67 → 68（OFFER / ACK / NAK，私设者的就是这种）
+#   在 nftables 的 **bridge** 家族 prerouting 上丢弃后者，就能保证桥内
+#   任何端口（有线 LAN 口、WiFi 的 phy*-ap*）都发不出 DHCP 应答。
+#   ★ 这就是「尤其无线端」：WiFi 客户端桥进 br-lan，它私开的 DHCP
+#     OFFER 与有线口一样从桥端口进 preruting，同样被丢。
+#   ★ 本机 dnsmasq 的应答是 local generated，走 bridge 的 output hook，
+#     不经过 prerouting，所以不会误杀，LAN/WiFi 照样从 192.168.1.1 拿 IP。
+#
+# 依赖：kmod-nft-bridge（config 已 =y）、nftables 用户态（已 =y）。
+# `table` + `flush table` + `table {...}` 是 fw4 自己用的模式，可重复加载，
+# fw4 reload 重建 inet fw4 表时不会把本表冲掉（flush 只针对 inet fw4）。
+# ---------------------------------------------------------------------------
+
+table bridge rogue_dhcp
+flush table bridge rogue_dhcp
+table bridge rogue_dhcp {
+    chain prerouting {
+        type filter hook prerouting priority 0; policy accept;
+        ether type ip udp sport 67 udp dport 68 counter drop comment "Drop rogue DHCP OFFER/ACK/NAK from any LAN/WiFi bridge port"
+    }
+}
