@@ -33,9 +33,10 @@ env:
   # 为控制仓库体积，只保留最近 5 次成功发布的固件 Release，更早的自动删除。
   # 只清理 fw- 前缀；cache-backup（工具链缓存）与旧版滚动 Release 一律不动。
   KEEP_FW_RELEASES: '5'
-  # 救砖镜像（initramfs-recovery）是否也作为**独立**附件传 Release。
-  # 默认 false：下载页只放刷机那一个固件，最直观也最小；改 true 两个固件并列。
-  UPLOAD_RECOVERY: 'false'
+  # 刷机镜像（squashfs-sysupgrade）+ 救砖镜像（initramfs-recovery）**两个都传**。
+  # 2026-11-24 用户要求：不要压缩包、下载页直接放两个裸 .itb 普通文件。
+  # 此项保留仅为兼容旧配置；发布步骤不再按它过滤，恒传两个。
+  UPLOAD_RECOVERY: 'true'
   RELEASE_LOG_FILE: RELEASES.md      # 每次发布自动往仓库这个文件追加一行记录
   CLEAN_WORKFLOW_RUNS: 'false'       # 默认不删 workflow run 日志，方便倒查
   # 固件文件名插入构建时间戳。下划线无冒号：upload-artifact 拒绝 `: " < > | * ?`。
@@ -701,10 +702,10 @@ jobs:
           #   报 "Library not found: .../lib/libc.so" → Error 1，三轮重试全挂。
           #   这里在 diy 阶段（几分钟）就拦住，别再浪费 1.5 小时。
           if grep -q '^CONFIG_USE_MKLIBS=y' .config 2>/dev/null; then
-            echo "::error::CONFIG_USE_MKLIBS=y 与 apk+musl 不兼容：mklibs 会报 Library not found: lib/libc.so 并在 package/install 失败。请把 configs/*.config 改成 '# CONFIG_USE_MKLIBS is not set'；压缩用发布期 .tar.zst 即可。"
+            echo "::error::CONFIG_USE_MKLIBS=y 与 apk+musl 不兼容：mklibs 会报 Library not found: lib/libc.so 并在 package/install 失败。请把 configs/*.config 改成 '# CONFIG_USE_MKLIBS is not set'；体积靠编译期符号，发布期不压缩。"
             exit 1
           fi
-          echo "✅ mklibs 已禁用（压缩由发布期 .tar.zst 负责）"
+          echo "✅ mklibs 已禁用（发布期不压缩，Release 直接放裸 .itb）"
           echo "✅ 已追加机型配置: ${CONFIG_FILE}（行尾注释已剥离）" 
 
           # ---------------------------------------------------------------
@@ -2015,7 +2016,7 @@ jobs:
           echo "FIRMWARE=$PWD" >> "$GITHUB_ENV"
           echo "status=success" >> "$GITHUB_OUTPUT"
 
-      # 只给主固件加日期：<名>-20261124-0743.itb.zst（上海时间，短格式）。
+      # 两个 .itb 都加日期：<名>-20261124-0743.itb（上海时间，短格式，裸文件不压缩）。
       # 2026-11-24 改：旧格式 2026-11-23_174912(Shanghai) 太长、带括号，
       # 用户反馈「名字加日期不方便」→ 改成 8 位日期 + 4 位时分，仍带日期、无冒号括号。
       # 其余产物保持原名；刷机脚本/文档引用的名字不用动。
@@ -2031,11 +2032,11 @@ jobs:
           echo "FW_TS=${TS}" >> "$GITHUB_ENV"
           echo "本次文件名时间戳: ${TS}"
 
-          # 只动 sysupgrade 的 .itb；factory.bin / ubi / manifest 一律原名
-          ONLY_OLD=""; ONLY_NEW=""; already=0
-          for f in *-squashfs-sysupgrade*.itb; do
+          # sysupgrade 与 initramfs-recovery **两个都改名**；其余产物一律原名
+          RENAMED=(); already=0
+          for f in *-squashfs-sysupgrade*.itb *-initramfs*recovery*.itb; do
             [ -f "$f" ] || continue
-            # 幂等护栏：已经带时间戳的直接跳过，别叠加成 -TS-TS
+            # 幂等护栏：已经带日期的直接跳过，别叠加成 -TS-TS
             case "$f" in
               *-[0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9]-[0-9][0-9][0-9][0-9]*) already=$((already + 1)); continue ;;
             esac
@@ -2046,34 +2047,38 @@ jobs:
             fi
             mv -f -- "$f" "$NEW"
             echo "  $f  ->  $NEW"
-            ONLY_OLD="$f"; ONLY_NEW="$NEW"
+            RENAMED+=("$f" "$NEW")
           done
 
-          if [ -z "$ONLY_NEW" ]; then
+          if [ "${#RENAMED[@]}" -eq 0 ]; then
             if [ "$already" -gt 0 ]; then
-              echo "文件名已带时间戳（${already} 个），跳过改名"
+              echo "文件名已带日期（${already} 个），跳过改名"
             else
-              echo "::warning::目录里没有 *-squashfs-sysupgrade.itb，本次不改任何文件名"
+              echo "::warning::目录里没有 *squashfs-sysupgrade*.itb / *initramfs*recovery*.itb，本次不改任何文件名"
               echo "目录内容: $(ls | tr '\n' ' ')"
             fi
           else
-            # profiles.json 里的文件名 + sha256 必须同步，否则 owut / ASU 指向旧名 404
+            # profiles.json 里的文件名 + sha256 必须同步（两个镜像一起改），
+            # 否则 owut / ASU 指向旧名 404
             if [ -f profiles.json ]; then
-              python3 - "$ONLY_OLD" "$ONLY_NEW" <<'PY' || echo "::warning::profiles.json 未更新，owut/ASU 可能取不到新固件"
+              python3 - "${RENAMED[@]}" <<'PY' || echo "::warning::profiles.json 未更新，owut/ASU 可能取不到新固件"
           import hashlib, json, sys
 
-          old, new = sys.argv[1], sys.argv[2]
-          sha = hashlib.sha256(open(new, 'rb').read()).hexdigest()
+          pairs = list(zip(sys.argv[1::2], sys.argv[2::2]))
+          mapping = {old: new for old, new in pairs}
+          sha = {new: hashlib.sha256(open(new, 'rb').read()).hexdigest()
+                 for _, new in pairs}
           with open('profiles.json', encoding='utf-8') as fp:
               data = json.load(fp)
 
 
           def walk(node):
               if isinstance(node, dict):
-                  if node.get('name') == old:
+                  if node.get('name') in mapping:
+                      new = mapping[node['name']]
                       node['name'] = new
                       if 'sha256' in node:
-                          node['sha256'] = sha
+                          node['sha256'] = sha[new]
                   for v in node.values():
                       walk(v)
               elif isinstance(node, list):
@@ -2091,7 +2096,11 @@ jobs:
             rm -f sha256sums
             sha256sum * > sha256sums 2>/dev/null || true
 
-            echo "已改名: \`${ONLY_OLD}\` -> \`${ONLY_NEW}\`" >> "$GITHUB_STEP_SUMMARY"
+            i=0
+            while [ "$i" -lt "${#RENAMED[@]}" ]; do
+              echo "已改名: \`${RENAMED[$i]}\` -> \`${RENAMED[$((i+1))]}\`" >> "$GITHUB_STEP_SUMMARY"
+              i=$((i + 2))
+            done
           fi
 
           echo "文件名时间戳: ${TS}" >> "$GITHUB_STEP_SUMMARY"
@@ -2105,72 +2114,52 @@ jobs:
           path: ${{ env.FIRMWARE }}
 
       # ---------------------------------------------------------------
-      # 固件文件处理（2026-11-23 二次改版）
-      #   · 之前把 recovery + sysupgrade 两个镜像 tar 成一个 .tar.zst，
-      #     "2 合 1" 不直观，且 recovery（含完整 rootfs）几乎压不动，
-      #     结果 147.77 MB → 122.99 MB，比单个裸 sysupgrade(78 MB) 还大。
-      #   · 现在**每个镜像各自压成一个同名 .zst**，一个文件对应一个固件，
-      #     文件名直接带 squashfs-sysupgrade / initramfs-recovery，一眼可分。
-      #   · 默认只把刷机用的 sysupgrade 传 Release；救砖镜像留在 Artifact。
-      #     把 env.UPLOAD_RECOVERY 改成 'true' 则两个独立附件并列（完全分开）。
-      #   · 解压：zstd -d <文件>.zst（或 gunzip <文件>.gz）→ 得到 .itb
+      # 固件文件处理（2026-11-24 三次改版）
+      #   · 用户明确：「不要压缩包，普通文件就行」「不是有两个的吗」。
+      #     下载页直接放 **两个裸 .itb**：squashfs-sysupgrade（刷机）
+      #     + initramfs-recovery（救砖），一眼两个文件，不用解压。
+      #   · 本步不再调 zstd / gzip，只做三件事：
+      #       1) 清掉可能残留的旧压缩包（避免混进下载页）
+      #       2) 确认两个 .itb 都在（缺 recovery 只 warning，不阻断）
+      #       3) 生成只含这两个的 sha256sums
+      #   · 体积代价（如实说）：裸 .itb 各 70~80 MB，两个约 150 MB / Release；
+      #     保留最近 5 次时固件占用会回到 600~800 MB 量级。
+      #     想省空间：删历史 Release 或调小 KEEP_FW_RELEASES，别再压回包。
+      #   · id 仍是 compress、仍写 status=success，避免改动下游步骤依赖。
       # ---------------------------------------------------------------
-      - name: Prepare independent firmware files
+      - name: Prepare firmware files (no compression)
         id: compress
         if: steps.organize.outputs.status == 'success' && env.UPLOAD_RELEASE == 'true'
         run: |
           cd "$FIRMWARE"
 
-          IMAGES=()
-          for f in *.itb *.bin *.ubi *.img *.fit *.trx; do
-            [ -f "$f" ] && IMAGES+=("$f")
-          done
-          if [ "${#IMAGES[@]}" -eq 0 ]; then
-            echo "::warning::没找到刷机镜像，跳过压缩"
-            echo "status=skipped" >> "$GITHUB_OUTPUT"
-            exit 0
-          fi
+          # 清掉旧版遗留的压缩包：*.itb.zst / *.itb.gz / *-firmware.tar.*
+          rm -f ./*.zst ./*.gz ./*.tar ./*.tar.zst ./*.tar.gz 2>/dev/null || true
 
-          HAVE_ZSTD=0
-          command -v zstd >/dev/null 2>&1 && HAVE_ZSTD=1
-          [ "$HAVE_ZSTD" -eq 0 ] && echo "::warning::runner 没有 zstd，回退 gzip -9"
-
-          BEFORE=0; AFTER=0
-          RELEASE_FILES=()
-          for f in "${IMAGES[@]}"; do
-            case "$f" in
-              *initramfs*recovery*|*recovery*initramfs*)
-                if [ "${UPLOAD_RECOVERY:-false}" != 'true' ]; then
-                  echo "  ⏭ 独立留在 Artifact（不进下载页）: $f ($(( $(stat -c %s "$f") /1048576 )) MiB)"
-                  continue
-                fi
-                ;;
-            esac
-            BEFORE=$((BEFORE + $(stat -c %s "$f")))
-            if [ "$HAVE_ZSTD" -eq 1 ]; then
-              OUT="${f}.zst"
-              zstd -19 -T0 -q -f "$f" -o "$OUT"
-            else
-              OUT="${f}.gz"
-              gzip -9 -c "$f" > "$OUT"
-            fi
-            SZ=$(stat -c %s "$OUT")
-            AFTER=$((AFTER + SZ))
-            RELEASE_FILES+=("$OUT")
-            echo "  ✅ 独立固件: $OUT ($(( SZ /1048576 )) MiB)"
-          done
-
-          if [ "${#RELEASE_FILES[@]}" -eq 0 ]; then
-            echo "::error::过滤后没有任何固件可发布（检查 UPLOAD_RECOVERY 与镜像命名）"
+          SYS="$(ls -1 *squashfs-sysupgrade*.itb 2>/dev/null | head -1)"
+          REC="$(ls -1 *initramfs*recovery*.itb 2>/dev/null | head -1)"
+          if [ -z "$SYS" ]; then
+            echo "::error::没找到 squashfs-sysupgrade.itb，无法发布"
             exit 1
           fi
-          echo "  压缩前合计: $(( BEFORE /1048576 )) MiB → 独立文件合计: $(( AFTER /1048576 )) MiB"
-          if [ "$BEFORE" -gt 0 ]; then
-            echo "  节省 $(( (BEFORE-AFTER)*100/BEFORE ))%" 
-            echo "固件独立压缩节省 $(( (BEFORE-AFTER)*100/BEFORE ))%（$(( BEFORE /1048576 )) → $(( AFTER /1048576 )) MiB）" >> "$GITHUB_STEP_SUMMARY"
+
+          RELEASE_FILES=("$SYS")
+          if [ -n "$REC" ]; then
+            RELEASE_FILES+=("$REC")
+          else
+            echo "::warning::本次没产出 initramfs-recovery.itb，下载页将只有 1 个固件（用户要求 2 个，检查 target 镜像配置）"
           fi
 
-          # 只列实际上传的文件算校验和，避免说明里出现一堆下载不到的条目
+          TOTAL=0
+          for f in "${RELEASE_FILES[@]}"; do
+            SZ=$(stat -c %s "$f")
+            TOTAL=$((TOTAL + SZ))
+            echo "  ✅ 裸固件（未压缩）: $f ($(( SZ /1048576 )) MiB)"
+          done
+          echo "  下载页固件合计: $(( TOTAL /1048576 )) MiB / ${#RELEASE_FILES[@]} 个文件（无压缩包）"
+          echo "Release 附件：${#RELEASE_FILES[@]} 个裸 .itb，合计 $(( TOTAL /1048576 )) MiB，未压缩" >> "$GITHUB_STEP_SUMMARY"
+
+          # 只列实际上传的两个，说明里不再出现一堆下载不到的条目
           rm -f sha256sums
           sha256sum "${RELEASE_FILES[@]}" > sha256sums
           echo "status=success" >> "$GITHUB_OUTPUT"
@@ -2222,11 +2211,11 @@ jobs:
           echo "dev_cn=${DEV_CN}" >> "$GITHUB_OUTPUT"
 
           # ---------- 主固件名 ----------
-          # 每个固件各自独立压缩成 <原名>.zst；优先刷机用的 sysupgrade
-          MAIN_FW="$(cd "$FIRMWARE" && ls -1 *squashfs-sysupgrade*.itb.zst *squashfs-sysupgrade*.itb.gz 2>/dev/null | head -1)"
-          [ -z "$MAIN_FW" ] && MAIN_FW="$(cd "$FIRMWARE" && ls -1 *.zst *.gz 2>/dev/null | head -1)"
-          [ -z "$MAIN_FW" ] && MAIN_FW="$(cd "$FIRMWARE" && ls -1 *-squashfs-sysupgrade*.itb 2>/dev/null | head -1)"
+          # 下载页两个裸 .itb 并列；这里取刷机用的那个做「主固件」展示
+          MAIN_FW="$(cd "$FIRMWARE" && ls -1 *squashfs-sysupgrade*.itb 2>/dev/null | head -1)"
+          [ -z "$MAIN_FW" ] && MAIN_FW="$(cd "$FIRMWARE" && ls -1 *.itb 2>/dev/null | head -1)"
           [ -z "$MAIN_FW" ] && MAIN_FW="$(cd "$FIRMWARE" && ls -1 | head -1)"
+          RECOVERY_FW="$(cd "$FIRMWARE" && ls -1 *initramfs*recovery*.itb 2>/dev/null | head -1)"
           echo "main_fw=${MAIN_FW}" >> "$GITHUB_OUTPUT"
 
           SRC_COMMIT="$(cd "$BUILD_ROOT"/openwrt && git rev-parse --short HEAD)"
@@ -2275,19 +2264,18 @@ jobs:
             echo ""
             echo "## 下载与校验"
             echo ""
-            echo '```bash'
-            echo "zstd -d '${MAIN_FW}'   # 无 zstd 时：gunzip '<文件>.itb.gz'；得到 .itb"
-            echo '```'
+            echo "| 文件 | 用途 |"
+            echo "|------|------|"
+            echo "| \`${MAIN_FW}\` | **刷机固件**：LuCI「系统 → 备份/升级」直接刷 |"
+            if [ -n "${RECOVERY_FW:-}" ]; then
+              echo "| \`${RECOVERY_FW}\` | **救砖固件**：initramfs-recovery，U-Boot / 恢复用 |"
+            fi
             echo ""
-            echo "解压出的 \`*-squashfs-sysupgrade.itb\` 用 LuCI「系统 → 备份/升级」刷。"
+            echo "两个都是**裸 \`.itb\` 普通文件，没有压缩包、不用解压**；SHA256 见同页 \`sha256sums\` 附件。"
+            echo ""
             echo "刷完 LuCI「服务 → Homebox」应显示运行中；浏览器开 \`http://192.168.1.1:3300\` 测内网吞吐。"
             echo "DHCP Snooping 默认生效、无需配置；核对：\`nft list table bridge rogue_dhcp\`（见仓库 固件发布日志.md）。"
-            echo "救砖用的 \`*-initramfs-recovery.itb\`、裸镜像与 buildinfo/profiles.json 均在本次 run 的 Artifact 里。"
-            echo ""
-            echo "SHA256（\`${MAIN_FW}\`）："
-            echo '```'
-            (cd "$FIRMWARE" && sha256sum "$MAIN_FW" 2>/dev/null)
-            echo '```'
+            echo "跨版本 sysupgrade 不要勾「保留配置」；buildinfo / manifest / profiles.json 仍在本次 run 的 Artifact 里。"
             echo ""
           } > release.txt
 
@@ -2313,13 +2301,15 @@ jobs:
           make_latest: true
           # 不同机型产物后缀不同，缺哪种都别让这一步失败
           fail_on_unmatched_files: false
-          # 下载页只放「一个固件一个独立文件」+ 校验和。
-          # buildinfo / manifest / profiles.json / 裸 .itb 全留在 Artifact，
-          # 不再占下载页，也不再让人以为有一堆日志文件要下。
-          # 把 env.UPLOAD_RECOVERY 改成 'true'，两个固件会各自独立并列。
+          # 下载页只放 **两个裸 .itb**（刷机 + 救砖）+ 校验和。
+          # 2026-11-24：不再压缩、不再只出 1 个；无 *.zst / *.gz / *.tar.*。
+          # 用与 Prepare firmware files 完全一致的两个 pattern，不用 *.itb：
+          # 万一 target 以后多产出一个别的 .itb，下载页也不会变成 3 个、
+          # 且不会出现「传了但 sha256sums 里没有」的条目。
+          # buildinfo / manifest / profiles.json 仍只留在 Artifact。
           files: |
-            ${{ env.FIRMWARE }}/*.zst
-            ${{ env.FIRMWARE }}/*.gz
+            ${{ env.FIRMWARE }}/*squashfs-sysupgrade*.itb
+            ${{ env.FIRMWARE }}/*initramfs*recovery*.itb
             ${{ env.FIRMWARE }}/sha256sums
 
       - name: Append to repository release log
