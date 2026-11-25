@@ -757,26 +757,57 @@ jobs:
           #   默认关闭 igmp_snoop，必须显式写 UCI。
           #   实现放在 files/etc/uci-defaults/99-zz-igmp-snooping：
           #     找 type=bridge 的 config device 写 igmp_snooping=1，
-          #     并在 br-lan 存在时写 sysfs 兜底。
+          #     并在 br-lan 存在时写 sysfs 兜底（2026-11-25 起改为全桥逐端口 + hotplug）。
           #   ⚠ 这是运行期配置，不是 .config 符号；CONFIG_BRIDGE_IGMP_SNOOPING
           #     是内核符号，写顶层 .config 会被 target config 覆盖，故不在此查。
           # ---------------------------------------------------------------
+          # 2026-11-25 扩展：用户要求「每个网口开启 igmp snooping 及开启组播流量」。
+          # 技术事实：Snooping 是**桥**属性，端口上能设的是 multicast_router /
+          # fast_leave / to_unicast。所以校验三层都要在：
+          #   ① UCI：所有 bridge 段 igmp_snooping=1
+          #   ② hotplug：逐桥 multicast_snooping/querier + 逐端口参数
+          #      ★ querier 必需，否则 MDB ~125s 老化，IPTV 两分钟后断流
+          #   ③ nftables：显式放行 IGMP(协议2) + 224.0.0.0/4
+          #   ④ igmpproxy 上游模板（不自动启用，避免与 omcproxy 抢）
           SNOOP_SCRIPT="files/etc/uci-defaults/99-zz-igmp-snooping"
-          if [ ! -f "$SNOOP_SCRIPT" ]; then
-            echo "::error::缺 $SNOOP_SCRIPT，IGMP Snooping 不会开启（用户明确要求）"
-            exit 1
-          fi
-          for kw in 'igmp_snooping=1' 'multicast_snooping' 'logger -t igmp-snoop'; do
+          HOTPLUG_SCRIPT="files/etc/hotplug.d/net/99-bridge-multicast"
+          MCAST_NFT="files/etc/multicast-allow.nft"
+          IGMP_CFG="files/etc/config/igmpproxy"
+          for f in "$SNOOP_SCRIPT" "$HOTPLUG_SCRIPT" "$MCAST_NFT" "$IGMP_CFG"; do
+            if [ ! -f "$f" ]; then
+              echo "::error::缺 $f：逐端口 IGMP Snooping / 组播放行不会生效"
+              exit 1
+            fi
+          done
+          for kw in 'igmp_snooping=1' 'multicast_querier' 'logger -t igmp-snoop'                     '99-bridge-multicast' 'multicast-allow.nft'; do
             if ! grep -qF "$kw" "$SNOOP_SCRIPT"; then
               echo "::error::$SNOOP_SCRIPT 缺少关键逻辑: $kw"
               exit 1
             fi
           done
-          if grep -qE 'echo "::(warning|error)::' "$SNOOP_SCRIPT"; then
-            echo "::error::$SNOOP_SCRIPT 里出现 GitHub 注解式输出（在路由器上会变成错误日志），请改用 logger"
+          for kw in 'multicast_snooping' 'multicast_querier' 'multicast_router' 'brif' 'multicast_fast_leave' 'multicast_to_unicast'; do
+            if ! grep -qF "$kw" "$HOTPLUG_SCRIPT"; then
+              echo "::error::$HOTPLUG_SCRIPT 缺少逐端口组播参数: $kw"
+              exit 1
+            fi
+          done
+          for kw in 'ip protocol 2' '224.0.0.0/4'; do
+            if ! grep -qF "$kw" "$MCAST_NFT"; then
+              echo "::error::$MCAST_NFT 缺少组播放行规则: $kw"
+              exit 1
+            fi
+          done
+          if ! grep -qF "direction 'upstream'" "$IGMP_CFG"; then
+            echo "::error::$IGMP_CFG 缺少 upstream phyint，组播无法从 WAN 进 LAN"
             exit 1
           fi
-          echo "✅ IGMP Snooping 首启脚本齐备（UCI bridge igmp_snooping=1 + sysfs 兜底）"
+          for f in "$SNOOP_SCRIPT" "$HOTPLUG_SCRIPT"; do
+            if grep -qE 'echo "::(warning|error)::' "$f"; then
+              echo "::error::$f 里出现 GitHub 注解式输出（在路由器上会变成错误日志），请改用 logger"
+              exit 1
+            fi
+          done
+          echo "✅ 组播齐备：所有桥 Snooping+Querier / 每端口 mrouter+fast_leave+无线 to_unicast / IGMP+224.0.0.0/4 放行 / igmpproxy 上游模板"
 
           # ---------------------------------------------------------------
           # DHCP Snooping 硬校验（2026-11-24）——防私设 DHCP，尤其无线端
@@ -872,6 +903,72 @@ jobs:
               exit 1
             fi
             echo "✅ Homebox 三件套齐备：匿名 section + 按 type 读 enabled + 裸跑自启 :3300"
+
+          # ---------------------------------------------------------------
+          # 上网时间控制 Plus（miaplus）fw4 兼容性硬校验（2026-11-25）
+          #   用户复报「上网时间控制Plus 未运行」「和 PassWall 都启动不了」。
+          #   查上游 kingyond/luci-app-accesscontrol-plus 源码确认：
+          #     · controller/miaplus.lua:18 用 `iptables -L INPUT | grep MIAPLUS` 判活
+          #     · root/etc/init.d/miaplus 全是 iptables / ip6tables 命令
+          #     · luci-miaplus uci-defaults 注册 fw3 `config include type=script`，
+          #       fw4 的 run_includes() 会执行它 → 每次 fw4 reload 重跑旧 init
+          #     · init 里 `REDIRECT --to-ports 53` 劫持 DNS，跟 PassWall 的
+          #       dns_redirect=1 / chinadns-ng 抢 53
+          #   本固件是 fw4 + 纯 nftables（config 连 iptables 包都没有），
+          #   所以 iptables 命令不存在 → 状态永远「未运行」、规则从不生效。
+          #   修复：files/ 覆盖成 nftables 后端，不碰 53；controller 改判
+          #   `nft list table inet miaplus`；首启删 fw3 include + 写 cron。
+          # ---------------------------------------------------------------
+          if grep -q '^CONFIG_PACKAGE_luci-app-accesscontrol-plus=y' .config 2>/dev/null; then
+            for f in files/etc/config/miaplus files/etc/init.d/miaplus \
+                     files/usr/sbin/miaplus-apply files/etc/uci-defaults/99-zz-miaplus \
+                     files/usr/lib/lua/luci/controller/miaplus.lua; do
+              if [ ! -f "$f" ]; then
+                echo "::error::缺 $f：miaplus 仍是 fw3/iptables 老实现，fw4 下永远「未运行」且会抢 PassWall 的 53"
+                exit 1
+              fi
+            done
+            # 后端绝不能再用 iptables（本固件没这个命令）
+            for f in files/etc/init.d/miaplus files/usr/sbin/miaplus-apply; do
+              if grep -v '^[[:space:]]*#' "$f" | grep -qE '(^|[^a-z])iptables([^a-z]|$)'; then
+                echo "::error::$f 仍调用 iptables（fw4 纯 nftables 固件无此命令）"
+                exit 1
+              fi
+            done
+            # 绝不能碰 53 端口（PassWall 独占 DNS）
+            for f in files/etc/init.d/miaplus files/usr/sbin/miaplus-apply; do
+              if grep -v '^[[:space:]]*#' "$f" | grep -qE 'dport 53|to-ports 53|--dport 53'; then
+                echo "::error::$f 仍操作 53 端口，会跟 PassWall 的 dns_redirect=1 抢 DNS"
+                exit 1
+              fi
+            done
+            if ! grep -qF 'nft list table inet miaplus' files/usr/lib/lua/luci/controller/miaplus.lua; then
+              echo "::error::miaplus controller 没改成 nft 判活，LuCI 仍会显示「未运行」"
+              exit 1
+            fi
+            if ! grep -qF 'delete firewall.miaplus' files/etc/uci-defaults/99-zz-miaplus; then
+              echo "::error::99-zz-miaplus 没删 fw3 script include，fw4 每次 reload 仍会执行旧 init"
+              exit 1
+            fi
+            if ! grep -qF 'miaplus-apply' files/etc/uci-defaults/99-zz-miaplus; then
+              echo "::error::99-zz-miaplus 没注册 cron，时间段切换不会生效"
+              exit 1
+            fi
+            echo "✅ 上网时间控制 Plus：nftables 后端 / nft 判活 / 已删 fw3 include / cron 每分钟重算 / 不碰 53"
+          fi
+
+          # PassWall 启用引导（不自动 enable，但文档必须在，否则用户不知道要加节点）
+          if grep -q '^CONFIG_PACKAGE_luci-app-passwall=y' .config 2>/dev/null; then
+            if [ ! -f PassWall_启用引导.md ]; then
+              echo "::error::缺 PassWall_启用引导.md：PassWall 无节点时不会启动代理，必须说明三步配置"
+              exit 1
+            fi
+            if ! grep -qF 'ENABLED_DEFAULT_ACL' PassWall_启用引导.md; then
+              echo "::error::PassWall_启用引导.md 没解释「无节点不启动」的根因"
+              exit 1
+            fi
+            echo "✅ PassWall 启用引导齐备（固件不预置节点，三步：订阅 → 选节点 → 勾启用）"
+          fi
           fi
 
           # ---------------------------------------------------------------
@@ -2285,6 +2382,8 @@ jobs:
             echo "| 时区 | Asia/Shanghai（UTC+8） |"
             echo "| IPv6 | 关闭 |"
             echo "| 内网 NTP | \`192.168.1.1:123\`，DHCP option 42 下发 |"
+            echo "| 上网时间控制 Plus | 已启用（nftables 后端，空规则＝不限制）；在「客户端规则」里加 MAC + 模板才生效 |"
+            echo "| PassWall | 已装但未自动启用：**节点订阅 → 节点列表选节点 → 基本设置勾「启用」**（固件不预置节点，详见 \`PassWall_启用引导.md\`） |"
             echo "| DNS | PassWall 独占（chinadns-ng 分流）；SmartDNS 已移除 |"
             echo "| 系统 DNS 服务 | **仅 \`dnsmasq\`**：只发 DHCP + 缓存，不配任何上游。**不是 DNS 插件**，删了 LAN 拿不到 IP、PassWall 也起不来 |"
             echo "| 主题 / 语言 | ARGON / 简体中文 |"
