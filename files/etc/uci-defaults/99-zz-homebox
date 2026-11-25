@@ -1,41 +1,65 @@
 #!/bin/sh
-# 99-zz-homebox —— 首次开机补齐 Homebox 出厂配置并设为自启
+# 99-zz-homebox —— 首次开机补齐 Homebox 出厂配置并拉起服务
 # ---------------------------------------------------------------------------
 # sirpdboy/netspeedtest 的预编译版 Makefile 只装 /usr/bin/homebox，
 # 不带 /etc/config/homebox 与 /etc/init.d/homebox；而 luci-app-homebox
-# 的 controller 要求 /etc/config/homebox 存在才注册菜单，否则界面不出来。
-# 本仓库 files/ 已把这两个文件打进 rootfs，这里只做幂等兜底：
-#   · 配置已存在 → 不覆盖（保留用户改过的端口等）
-#   · 缺了 → 建一份 enabled=1 / :3300
-#   · 补执行位、enable 服务、清 LuCI 索引缓存
+# 的 controller 要求 /etc/config/homebox 存在才注册菜单。
+#
+# 2026-11-25 修复：
+#   · 出厂配置改成**匿名 section** `config homebox`，与 LuCI CBI 的
+#     `s.anonymous=true` 对齐（旧版命名 section 会让「全局设置」页面
+#     显示未勾选，一点保存就写坏 enabled）。
+#   · 已存在的旧配置也做规范化：命名 section / enabled≠1 都重写。
+#   · 不只是 enable，还要 restart —— 首启 uci-defaults 跑完就能在
+#     LuCI 看到 running，不用再手动重启一次。
+#   · 打印 pidof 自检结果到 logread，方便倒查。
 # ---------------------------------------------------------------------------
 log() { logger -t homebox-init "$@"; }
 
+NEED=0
 if [ ! -f /etc/config/homebox ]; then
+  NEED=1
+  log "/etc/config/homebox 不存在，将建匿名 section 默认配置"
+elif grep -q '^config homebox ' /etc/config/homebox; then
+  NEED=1
+  log "检测到命名 section（LuCI 的 anonymous=true 不认），规范化为匿名 section"
+elif [ "$(uci -q get homebox.@homebox[0].enabled 2>/dev/null)" != "1" ]; then
+  NEED=1
+  log "enabled 不是 1，重置为启用"
+fi
+
+if [ "$NEED" = "1" ]; then
   mkdir -p /etc/config
   cat > /etc/config/homebox <<'EOF'
-config homebox 'homebox'
+config homebox
 	option enabled '1'
 	option port '3300'
 	option logger '0'
 EOF
-  log "/etc/config/homebox 不存在，已建默认配置（enabled=1 / :3300）"
+  log "已写入匿名 section 默认配置（enabled=1 / :3300）"
 else
-  log "/etc/config/homebox 已存在，保留用户配置不覆盖"
+  log "配置已是匿名 section 且 enabled=1，保留不覆盖"
 fi
 
 chmod +x /etc/init.d/homebox 2>/dev/null || true
 
 if [ -x /etc/init.d/homebox ]; then
   /etc/init.d/homebox enable 2>/dev/null || true
-  log "Homebox 已设为开机自启"
+  /etc/init.d/homebox restart 2>/dev/null || true
+  sleep 2
+  if pidof homebox >/dev/null 2>&1; then
+    log "✅ Homebox 已自启并在运行（pidof 命中），http://192.168.1.1:3300"
+  else
+    log "⚠ restart 后 pidof 仍未命中，请查 logread -e homebox 与 /usr/bin/homebox -V"
+  fi
 else
-  log "警告：/etc/init.d/homebox 不存在（包未编入？），跳过 enable"
+  log "警告：/etc/init.d/homebox 不存在（包未编入？），跳过 enable/restart"
 fi
 
-# 清 LuCI 菜单缓存，避免旧索引里没有 Homebox 条目
+# 清 LuCI 菜单 / 索引缓存，避免旧索引里没有 Homebox 条目或显示旧状态
 rm -f /tmp/luci-indexcache /tmp/luci-indexcache.* 2>/dev/null
 [ -d /tmp/luci-modulecache ] && rm -rf /tmp/luci-modulecache/* 2>/dev/null
+[ -x /etc/init.d/rpcd ] && /etc/init.d/rpcd restart >/dev/null 2>&1 || true
 
 log "Homebox 出厂准备完成：http://192.168.1.1:3300"
 exit 0

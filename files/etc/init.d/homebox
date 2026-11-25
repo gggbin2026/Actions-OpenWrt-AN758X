@@ -1,18 +1,38 @@
 #!/bin/sh /etc/rc.common
 # Homebox 内网测速服务 —— procd 管理，默认自启 :3300
 # ---------------------------------------------------------------------------
-# 2026-11-24 恢复。之前报 "The Homebox service is not running" 的根因：
-#   v1.0.1 是 Rust 版，启动必须带 `serve` 子命令：
-#       homebox serve --host 0.0.0.0 --port 3300
-#   老 init 裸跑 /usr/bin/homebox 只会打印帮助立刻退出 → procd 反复
-#   respawn → pidof homebox 永远为空 → LuCI 红字。
-# 这里用 `--help` 探测是否支持 serve，自适应新旧二进制。
-# 端口固定 3300：luci-app-homebox 的 homebox_status() 把端口写死了，
-# 改了页面按钮会指错。
+# 2026-11-25 修复「The Homebox service is not running」，三个确凿根因：
 #
-# ⚠ 顶层只放变量与函数定义，不执行任何命令 —— OpenWrt 用 apk，
+# ① 读取方式错（主因）
+#    旧版用 `config_get enabled homebox enabled '0'` —— 这里的 `homebox`
+#    是 **section 名**。出厂配置写的是 `config homebox 'homebox'`（命名
+#    section）时能读到；但 luci-app-homebox 的 CBI 是
+#      s:section(TypedSection, "homebox", ...); s.anonymous=true
+#    只认**匿名** section。用户在「全局设置」点一次「保存&应用」，LuCI
+#    就会创建匿名 section（cfg0xxxx）并把 enabled 写过去，命名 section
+#    名不再是 homebox → config_get 取不到 → 用默认 '0' → return 0，
+#    服务永远不启动。这正是「菜单在、全局设置在、就是 not running」。
+#    现在改用 `uci -q get homebox.@homebox[0].enabled`，**按 type 索引**，
+#    命名/匿名 section 都能取到；且读不到时默认按启用处理。
+#
+# ② 启动命令的兜底分支是坏的
+#    旧版用 help 参数探测 serve 子命令，探测落空时走
+#      `$BIN --host 0.0.0.0 --port 3300`
+#    但上游 v1.0.1（Rust/clap）的 `--host` / `--port` **只属于 serve
+#    子命令**，顶层 Cli 只有 `command: Option<Commands>`，不认这两个
+#    参数 → clap 报 unexpected argument → 进程立刻退出 → procd 反复
+#    respawn → pidof homebox 永远空 → LuCI 红字。
+#
+# ③ 上一轮「裸跑会打印帮助立刻退出」的判断是错的
+#    上游 server/src/main.rs:209-210 明确：
+#      None => { println!("No command specified, starting server with
+#               default settings..."); start_server("0.0.0.0", 3300) }
+#    **不带任何参数即以 0.0.0.0:3300 启动**。这恰好和 LuCI 状态页
+#    写死的 port=3300 一致，也不依赖 serve / 参数解析，是最稳的路径。
+#
+# ⚠ 顶层只放变量与函数定义，不执行任何命令 —— OpenWrt apk 在
 #   package/install 装配 rootfs 时会以普通 sh 跑一遍包内 init.d 顶层
-#   （taskplan 就曾因顶层写 /etc 导致整轮编译失败）。
+#   （taskplan 曾因顶层写 /etc 导致整轮编译失败）。
 # ---------------------------------------------------------------------------
 
 START=99
@@ -22,26 +42,30 @@ USE_PROCD=1
 BIN="/usr/bin/homebox"
 
 start_service() {
-	[ -x "$BIN" ] || return 0
+	[ -x "$BIN" ] || {
+		logger -t homebox "二进制 $BIN 不存在，跳过启动"
+		return 0
+	}
 
-	config_load homebox
+	# 按 type 索引读取：匿名/命名 section 都兼容；读不到按启用处理
 	local enabled port
-	config_get enabled homebox enabled '0'
-	config_get port homebox port '3300'
-	[ "$enabled" = "1" ] || return 0
+	enabled="$(uci -q get homebox.@homebox[0].enabled 2>/dev/null)"
+	port="$(uci -q get homebox.@homebox[0].port 2>/dev/null)"
+	[ -z "$enabled" ] && enabled='1'
+	[ -z "$port" ] && port='3300'
+	[ "$enabled" = "1" ] || {
+		logger -t homebox "enabled=${enabled}，按配置不启动"
+		return 0
+	}
 
+	# 裸跑：v1.0.1 默认 0.0.0.0:3300，与 LuCI 写死端口一致
 	procd_open_instance
-	if "$BIN" --help 2>&1 | grep -q 'serve'; then
-		# v1.0.1+ Rust 版：必须带 serve 子命令
-		procd_set_param command "$BIN" serve --host 0.0.0.0 --port "$port"
-	else
-		# 老版：裸跑即可
-		procd_set_param command "$BIN" --host 0.0.0.0 --port "$port"
-	fi
+	procd_set_param command "$BIN"
 	procd_set_param respawn
 	procd_set_param stdout 1
 	procd_set_param stderr 1
 	procd_close_instance
+	logger -t homebox "已启动（默认 0.0.0.0:${port}）"
 }
 
 service_triggers() {
