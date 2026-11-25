@@ -1,0 +1,29 @@
+# /etc/config/igmpproxy —— 组播从 WAN 进 LAN 的上行模板
+# ---------------------------------------------------------------------------
+# 格式来自 OpenWrt 官方 package/network/services/igmpproxy/files/igmpproxy.config。
+# 「桥层 snooping + querier + 每端口参数」只管 LAN 内部怎么转发；
+# 组播要真正从光猫 WAN 侧进来，还得有 igmpproxy / omcproxy 订阅上游。
+#
+# ⚠ 本文件**只生成、不自动启用服务**：固件里 omcproxy 与 igmpproxy 两个代理
+#   都在（用户明确要求双代理保留），同时在同一上行接口启用会争抢 IGMP 加入。
+#   按需二选一：
+#     /etc/init.d/igmpproxy enable && /etc/init.d/igmpproxy restart   # IPv4 IPTV 直放
+#   或走 ONU 菜单的 omcproxy 组播路径（不要两个一起 enable）。
+#   现机一键脚本 组播_现机一键.sh 会在 omcproxy 未启用时替你启用 igmpproxy。
+#
+# 建议按运营商把 altnet 收紧到实际组播源网段；0.0.0.0/0 是兼容优先的宽松值。
+# ---------------------------------------------------------------------------
+
+config igmpproxy
+	option quickleave '1'
+
+config phyint
+	option network 'wan'
+	option zone 'wan'
+	option direction 'upstream'
+	list altnet '0.0.0.0/0'
+
+config phyint
+	option network 'lan'
+	option zone 'lan'
+	option direction 'downstream'

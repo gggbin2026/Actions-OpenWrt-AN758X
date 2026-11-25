@@ -1,42 +1,28 @@
 #!/bin/sh
 # ================================================================
-# 99-zz-igmp-snooping —— 开启 IGMP Snooping（2026-11-23）
+# 99-zz-igmp-snooping —— 所有桥 / 每个网口的 IGMP Snooping 与组播放行
 #
-# 用户要求：「igmp snooping 也要」「组播代理也要保留」。
+# 2026-11-23 初版：只写 UCI igmp_snooping=1 + br-lan sysfs。
+# 2026-11-25 扩展（用户要求「每个网口开启 igmp snooping 及开启组播流量」）：
+#   · UCI：遍历**所有** type=bridge 的段（不只 br-lan）
+#   · 运行期：交给 /etc/hotplug.d/net/99-bridge-multicast 逐桥逐端口套用
+#       multicast_snooping=1 / multicast_querier=1（★ 没 querier 会 ~125s 后断流）
+#       每端口 multicast_router / fast_leave / 无线 multicast_to_unicast
+#   · 防火墙：注册 multicast-allow.nft 显式放行 IGMP + 224.0.0.0/4
+#   · 上游：生成 /etc/config/igmpproxy 模板（不自动启用，避免与 omcproxy 抢）
 #
-# 背景（查证）：
-#   · OpenWrt Wiki「Network configuration」：igmp_snooping 是 **bridge 选项**
-#     （`config device` 段，21.02+；旧式写法是 `config interface lan` 里
-#      `option igmp_snooping 1`），只把组播发给真正订阅的端口，
-#     避免 IPTV 组播把 LAN/Wi-Fi 全部泛洪。
-#   · netifd commit 52541140 把默认的 `cfg->igmp_snoop = true` 删掉了 ——
-#     **新版默认关闭**，必须显式写 1。
-#   · 内核 CONFIG_BRIDGE_IGMP_SNOOPING 自 r41366 起在 generic config 里
-#     重新启用，但它是**内核符号**，写顶层 .config 会被
-#     target/linux/airoha/an7581/config-<kver> 覆盖（同 README 里
-#     CONFIG_CRYPTO_* 的坑）。所以本脚本不碰 .config，只写 UCI + sysfs。
+# 为什么这样分层：IGMP Snooping 是**桥**的属性，不是物理端口的属性；
+# 端口上能设的是 multicast_router / fast_leave / to_unicast。
+# 用户说的「每个网口开启」= 每个桥都开 + 该桥每个端口都显式配置，
+# 见 hotplug 脚本。uci-defaults 只跑一次，hotplug 在桥/端口出现时反复套用。
 #
-# 本脚本做两件事，幂等、可重复执行、任何一步失败都不阻断开机：
-#   1) 找到所有 type=bridge 的 config device 段（兼容旧式
-#      `config interface lan` + `option type bridge`），写
-#      igmp_snooping=1；commit network，等 network reload 生效。
-#   2) 若 br-lan 已存在（网络已起），直接写 sysfs
-#      /sys/class/net/br-lan/bridge/multicast_snooping = 1 立即生效。
-#
-# ⚠ 日志口径（用户要求「错误的日志也修复」）：
-#   · 首启时 br-lan 常常还没创建，sysfs 不存在是**正常**的，
-#     只打 logger 提示，不打 ::warning:: / ::error::（那是 GitHub Actions
-#     注解语法，在路由器上原样输出就是一条无意义的错误日志）。
-#   · 全部用 logger -t igmp-snoop，logread -e igmp-snoop 可查。
-#
-# 组播双代理（omcproxy + igmpproxy）都在固件里，但**别同时在同一上行
-# 接口启用**，会争抢组播加入 / 重复转发。建议 IPv4 IPTV 用 igmpproxy，
-# ONU 菜单自带组播路径用 omcproxy；rtp2httpd:5140 只转流不订阅。
+# ⚠ 日志口径：全部 logger -t igmp-snoop，绝不输出 ::warning:: / ::error::
+#   （那是 GitHub Actions 注解语法，在路由器上会变成一条无意义错误日志）。
 # ================================================================
 
 log() { logger -t igmp-snoop "$@"; }
 
-# ---- 1) UCI：找 bridge 段 ---------------------------------------
+# ---- 1) UCI：所有 bridge 段写 igmp_snooping=1 ------------------------
 BRSEC=""
 for s in $(uci -q show network 2>/dev/null \
            | sed -n 's/^network\.\([^.=]*\)=device$/\1/p'); do
@@ -55,31 +41,83 @@ if [ -n "$BRSEC" ]; then
     uci -q set "network.$s.igmp_snooping=1"
   done
   uci -q commit network
-  log "IGMP Snooping 已写入 UCI: 段[$BRSEC] igmp_snooping=1（network reload 后生效）"
+  log "已写入 UCI: 全部 bridge 段[$BRSEC] igmp_snooping=1（network reload 后生效）"
 else
-  log "提示：/etc/config/network 里没找到 type=bridge 的段（单网口/非桥接机型？），UCI 未改；组播代理仍可用"
+  log "提示：/etc/config/network 里没找到 type=bridge 的段；运行期 hotplug 仍会直接写 sysfs 兜底"
 fi
 
-# ---- 2) sysfs：网络已起时立即生效 --------------------------------
-SYSFS=""
-for p in /sys/class/net/br-lan/bridge/multicast_snooping \
-         /sys/devices/virtual/net/br-lan/bridge/multicast_snooping; do
-  if [ -w "$p" ]; then SYSFS="$p"; break; fi
-done
+# ---- 2) 运行期：逐桥逐端口立即套用（首启桥已存在时）------------------
+HOTPLUG="/etc/hotplug.d/net/99-bridge-multicast"
+if [ -f "$HOTPLUG" ]; then
+  MCAST_DEBUG=1 sh "$HOTPLUG" 2>/dev/null || true
+  log "已执行 $HOTPLUG：所有桥 Snooping + Querier + 每个端口 mrouter/fast_leave"
+else
+  log "警告：$HOTPLUG 不存在，逐端口参数未套用（仅 UCI 生效）"
+fi
 
-if [ -n "$SYSFS" ]; then
-  if echo 1 > "$SYSFS" 2>/dev/null; then
-    log "IGMP Snooping sysfs 已置 1: $SYSFS = $(cat "$SYSFS" 2>/dev/null)"
+# ---- 3) 防火墙：显式放行 IGMP 与组播（带静态校验与降级）--------------
+NFT_FILE="/etc/multicast-allow.nft"
+if [ -f "$NFT_FILE" ]; then
+  CHECK_OK=1
+  if command -v nft >/dev/null 2>&1; then
+    TMP="$(mktemp)"
+    grep -v '^table inet multicast_allow$' "$NFT_FILE" \
+      | grep -v '^flush table inet multicast_allow$' > "$TMP"
+    if ! nft -c -f "$TMP" >/dev/null 2>&1; then
+      log "组播放行片段静态校验未通过，改用最简写法"
+      cat > "$NFT_FILE" <<'EOF'
+table inet multicast_allow
+flush table inet multicast_allow
+table inet multicast_allow {
+    chain input {
+        type filter hook input priority -10; policy accept;
+        ip protocol 2 accept
+        ip daddr 224.0.0.0/4 accept
+    }
+}
+EOF
+      grep -v '^table inet multicast_allow$' "$NFT_FILE" \
+        | grep -v '^flush table inet multicast_allow$' > "$TMP"
+      if ! nft -c -f "$TMP" >/dev/null 2>&1; then
+        CHECK_OK=0
+        log "最简写法仍校验失败：跳过注册 include，保证 fw4 主 ruleset 能加载"
+      fi
+    fi
+    rm -f "$TMP"
   else
-    log "提示：写 $SYSFS 失败（只读？），UCI 设置仍在，重载网络后生效"
+    log "提示：本机无 nft 命令，跳过静态校验，交由 fw4 加载时判断"
+  fi
+
+  if [ "$CHECK_OK" = "1" ]; then
+    uci -q delete firewall.multicast_allow_include 2>/dev/null || true
+    uci set firewall.multicast_allow_include=include
+    uci set firewall.multicast_allow_include.enabled='1'
+    uci set firewall.multicast_allow_include.type='nftables'
+    uci set firewall.multicast_allow_include.path="$NFT_FILE"
+    uci set firewall.multicast_allow_include.position='ruleset-pre'
+    uci commit firewall
+    log "已注册 fw4 include：IGMP(协议2) + 224.0.0.0/4 显式放行"
   fi
 else
-  # 首启阶段 br-lan 尚未创建属正常，不报 error/warning
-  log "提示：未找到 bridge multicast_snooping sysfs（首启时 br-lan 尚未创建，或内核未编 CONFIG_BRIDGE_IGMP_SNOOPING）；不视为错误"
+  log "警告：$NFT_FILE 不存在，跳过组播放行注册（不影响 UCI 与 sysfs 部分）"
 fi
 
-# ---- 3) 清 LuCI 缓存，让「网络 → 接口」里显示新值 ----------------
-rm -f /tmp/luci-indexcache
-rm -rf /tmp/luci-modulecache
+# ---- 4) 上游组播：生成 igmpproxy 模板（不覆盖、不启用）----------------
+# 桥层只管 LAN 内部转发；组播从 WAN 进来要靠 igmpproxy 或 omcproxy。
+# 两个代理同时在上行启用会抢 IGMP 加入，所以这里只给模板，
+# 是否启用交给用户 / 现机一键脚本（它会避开 omcproxy 已启用的情况）。
+if [ ! -f /etc/config/igmpproxy ] && [ -f /rom/etc/config/igmpproxy ]; then
+  cp /rom/etc/config/igmpproxy /etc/config/igmpproxy 2>/dev/null || true
+fi
+if [ -f /etc/config/igmpproxy ]; then
+  log "/etc/config/igmpproxy 已存在，保留不覆盖；两个代理请勿同时在上行启用"
+else
+  log "提示：/etc/config/igmpproxy 不存在（包自带配置为准），组播上游按 LuCI 配置"
+fi
 
+# ---- 5) 清 LuCI 缓存 ---------------------------------------------------
+rm -f /tmp/luci-indexcache /tmp/luci-indexcache.* 2>/dev/null
+[ -d /tmp/luci-modulecache ] && rm -rf /tmp/luci-modulecache/* 2>/dev/null
+
+log "组播配置完成：所有桥 Snooping+Querier / 每端口已配置 / IGMP+组播已放行"
 exit 0

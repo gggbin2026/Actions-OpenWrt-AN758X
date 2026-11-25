@@ -1,0 +1,95 @@
+#!/bin/sh
+# /etc/hotplug.d/net/99-bridge-multicast
+# 每个网口（桥端口）启用 IGMP Snooping 相关参数 + 让组播流真正通
+# ---------------------------------------------------------------------------
+# 2026-11-25 用户要求「每个网口开启 igmp snooping 及开启组播流量」。
+#
+# 先说清一个技术事实（避免做错）：
+#   **IGMP Snooping 是「桥」的属性，不是物理网口的属性**。
+#   端口上能设的是 multicast_router / multicast_fast_leave /
+#   multicast_to_unicast。所以本脚本做两层：
+#     · 每个 bridge  → multicast_snooping=1 + multicast_querier=1
+#     · 该桥的**每一个端口**（有线 lan1..lanN、WiFi phy*-ap*、CPU 口）
+#       → 逐个写 multicast_router / fast_leave / to_unicast
+#
+# ★ 为什么必须开 multicast_querier（最容易漏、也最致命）：
+#   开启 snooping 后，桥靠 IGMP Report 学 (端口,组播组) 建 MDB；
+#   没有 querier 发周期性查询，客户端只在上电时报告一次，
+#   MDB 条目 ~125 秒后老化 → **IPTV / 组播看着配好了，两分钟后断流**。
+#   让桥自己当 querier（multicast_querier=1）就解决了。
+#
+# ★ multicast_router 取值（Linux 内核文档）：
+#   0 完全不当组播路由器口 / 1 自动检测（默认）/ 2 永远接收全部组播。
+#   默认给每个端口设 1（自动检测）：上游/CPU 口被自动识别，
+#   组播能进桥；下游口仍按 MDB 精确转发，snooping 的效果保留。
+#   若你要「每个口都收全量组播」→ 把 ALL_PORTS_MROUTER 改成 2
+#   （组播会泛洪到所有端口，snooping 的隔离效果就没了，高码率 IPTV
+#     会打满 WiFi，按需开）。桥自身端口固定设 2，保证本机
+#   igmpproxy / omcproxy / rtp2httpd 能收到所有组播。
+#
+# 触发：net hotplug（桥创建、端口加入/移除都会触发），所以 WiFi 晚起、
+#       热插拔 USB 网卡后也会重新套用，不只在首启跑一次。
+# 幂等：值已一致就不写、不刷屏；DEBUG=1 才打印逐项日志。
+# 测试：BRIDGE_SYSFS_ROOT 可指向模拟目录，便于离线验证。
+# ---------------------------------------------------------------------------
+
+ROOT="${BRIDGE_SYSFS_ROOT:-/sys/class/net}"
+MROUTER="${ALL_PORTS_MROUTER:-1}"       # 1=自动检测（推荐） 2=每口全量组播
+QUERY_INTERVAL="${MCAST_QUERY_INTERVAL:-6000}"   # 60s，比默认 125s 更稳
+DEBUG="${MCAST_DEBUG:-0}"
+
+log() {
+  [ "$DEBUG" = "1" ] || return 0
+  logger -t bridge-mcast "$@"
+}
+
+setw() {
+  # setw <path> <value>  —— 可写且值不同才写；失败静默（只读 sysfs 不算错误）
+  _p="$1"; _v="$2"
+  [ -w "$_p" ] || return 0
+  _cur="$(cat "$_p" 2>/dev/null)"
+  [ "$_cur" = "$_v" ] && return 0
+  if echo "$_v" > "$_p" 2>/dev/null; then
+    log "  ${_p##*/}: ${_cur} -> ${_v}"
+  fi
+  return 0
+}
+
+BRIDGES=0
+PORTS=0
+
+for _brdir in "$ROOT"/*/bridge; do
+  [ -d "$_brdir" ] || continue
+  _br="$(basename "$(dirname "$_brdir")")"
+  BRIDGES=$((BRIDGES + 1))
+  log "桥 $_br: 开始套用组播参数"
+
+  # ---- 桥级：Snooping + Querier ---------------------------------------
+  setw "$_brdir/multicast_snooping" 1
+  setw "$_brdir/multicast_querier"  1
+  setw "$_brdir/multicast_query_interval" "$QUERY_INTERVAL"
+  # 桥自身作为端口：让本机组播代理/转流服务收到全部组播
+  setw "$_brdir/multicast_router" 2
+
+  # ---- 端口级：该桥的每一个网口 ----------------------------------------
+  for _port in "$ROOT/$_br/brif"/*; do
+    [ -d "$_port" ] || continue
+    _pn="$(basename "$_port")"
+    PORTS=$((PORTS + 1))
+
+    setw "$_port/multicast_router" "$MROUTER"
+    setw "$_port/multicast_fast_leave" 1
+
+    # 无线端口：WiFi 组播走最低速率且易丢，转单播更稳
+    case "$_pn" in
+      phy*-ap*|wlan*|ra[0-9]*|rai[0-9]*|wl*)
+        setw "$_port/multicast_to_unicast" 1
+        log "  $_pn: 无线端口，multicast_to_unicast=1"
+        ;;
+    esac
+    log "  $_pn: multicast_router=$MROUTER fast_leave=1"
+  done
+done
+
+log "完成：$BRIDGES 个桥 / $PORTS 个端口（MROUTER=$MROUTER QUERIER=1）"
+exit 0

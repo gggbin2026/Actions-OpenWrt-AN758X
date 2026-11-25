@@ -283,3 +283,44 @@ openssl speed -evp chacha20-poly1305
 - NPU 只在三层路由模式生效，纯 AP 桥接时整机吞吐会掉到 2000 Mbps 左右。
 - `repository_dispatch` 触发时所有 choice 输入都是空，走 env 回退值：`PROFILE=fiberhome_hg5585f-ct`、`SOC=an7581`、`scope=firmware`。
 - 网页上传会把 `.sh` / uci-defaults 存成 `100644`（丢执行位）；`build-ponwrt.yml` 在编译前统一 `chmod +x`，走 CI 不受影响，脱离 CI 手动打包才需要自己补。
+
+
+---
+
+## 组播：每个桥 / 每个网口（2026-11-25）
+
+**IGMP Snooping 是桥属性，不是物理端口属性**；端口上能设的是
+`multicast_router` / `multicast_fast_leave` / `multicast_to_unicast`。
+本版对**每一个** bridge 开 `multicast_snooping=1` + **`multicast_querier=1`**
+（没有 querier 时 MDB 约 125 秒老化，IPTV 两分钟后断流），
+并对该桥**每一个端口**（有线 LAN、WiFi、CPU）逐个套用参数。
+`ALL_PORTS_MROUTER=2` 可切到「每口都收全量组播」，但高码率 IPTV 会泛洪到 WiFi，慎用。
+
+组播 WAN 上游仍需 `igmpproxy` 或 `omcproxy` **二选一启用**（模板已给，不自动 enable）；
+详见 `上传与核对说明.md`。核对：
+`bridge mdb show`、`cat /sys/class/net/br-lan/bridge/multicast_querier`、
+`nft list table inet multicast_allow`。
+
+
+---
+
+## 上网时间控制 Plus / PassWall 服务状态（2026-11-25）
+
+**上网时间控制 Plus** 原本是 fw3/iptables 时代的包，本固件是 fw4 + 纯 nftables，
+`iptables` 命令不存在，所以状态永远「未运行」。本版把它换成 nftables 后端：
+`table inet miaplus` 的 forward 链按 MAC drop，由 cron 每分钟按星期/时刻重建，
+**完全不碰 53 端口**，不再与 PassWall 抢 DNS。出厂 `enable=1` 但规则为空
+（＝运行状态、不限制任何客户端）；在「Base Setting → 客户端规则」加 MAC + 模板、
+在「高级设置」编辑时间段后才真正管控。核对：
+
+```sh
+nft list table inet miaplus
+crontab -l | grep miaplus
+logread -e miaplus
+```
+
+**PassWall 已装但不会自动启用**：固件不预置节点，`app.sh` 只有
+`(enabled=1 且 NODE 有效)` 才启动代理。首页 TCP/UDP/DNS「未运行」是设计，
+不是故障。三步：**节点订阅 → 添加并更新 → 节点列表选节点 → 基本设置勾「启用」**
+（开机自启另有 60 秒延时）。首页「GitHub 连接失败」是浏览器直连测试，不用管。
+完整说明见 **`PassWall_启用引导.md`**。

@@ -1,0 +1,49 @@
+#!/bin/sh /etc/rc.common
+# 上网时间控制 Plus —— fw4/nftables 版（替换上游 fw3/iptables 老实现）
+# ---------------------------------------------------------------------------
+# 上游原始 init.d 全是 `iptables -N MIAPLUS` / `ip6tables` /
+# `-j REDIRECT --to-ports 53`。本固件是 firewall4 + 纯 nftables，
+# iptables 命令不存在（config 里连包都没编），所以：
+#   · 状态页 `iptables -L INPUT | grep MIAPLUS` 永远失败 → 永远「未运行」
+#   · 规则从不生效
+#   · 那条 53 REDIRECT 若经 iptables-nft 兼容层生效，还会劫持 DNS，
+#     跟 PassWall 的 dns_redirect=1 / chinadns-ng 抢 53
+#
+# 本版：只建 `table inet miaplus` 的 forward 链，按 MAC drop，
+# 不碰 53、不碰 INPUT、不用 iptables。规则由 /usr/sbin/miaplus-apply
+# 按当前星期/时刻生成，cron 每分钟重跑以切换时间段。
+#
+# ⚠ 顶层只放变量与函数定义：apk 装配 rootfs 时会以普通 sh 跑一遍
+#   包内 init.d 顶层（taskplan 曾因此让整轮编译失败）。
+# ---------------------------------------------------------------------------
+
+START=30
+STOP=10
+USE_PROCD=1
+
+APPLY=/usr/sbin/miaplus-apply
+
+start_service() {
+  [ -x "$APPLY" ] || {
+    logger -t miaplus "$APPLY 不存在，跳过"
+    return 0
+  }
+  # apply 自己会建表 / flush / 按时间生成规则
+  "$APPLY"
+  logger -t miaplus "服务已启动：table inet miaplus（forward 按 MAC 管控，不碰 53）"
+}
+
+stop_service() {
+  if command -v nft >/dev/null 2>&1; then
+    nft delete table inet miaplus 2>/dev/null || true
+  fi
+  logger -t miaplus "服务已停止：table inet miaplus 已删除"
+}
+
+service_triggers() {
+  procd_add_reload_trigger miaplus
+}
+
+reload_service() {
+  [ -x "$APPLY" ] && "$APPLY"
+}

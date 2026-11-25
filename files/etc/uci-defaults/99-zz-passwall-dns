@@ -89,6 +89,11 @@ uci -q delete passwall.@global[0].dnsmasq_dns_redirect 2>/dev/null
 uci -q commit passwall
 log "PassWall 独占 DNS: dns_shunt=chinadns-ng dns_redirect=1 direct_dns=223.5.5.5"
 log "链路: LAN → PassWall dnsmasq(53) → chinadns-ng → 国内直连/国外远端"
+# 2026-11-25：用户多次反馈「PassWall 启动不了」。固件不预置节点，
+# app.sh 的 get_config() 只有 (enabled=1 且 NODE 有效) 才置
+# ENABLED_DEFAULT_ACL=1 并启动代理；否则首页 TCP/UDP/DNS 全显示未运行。
+# 这里只写 DNS 参数、**不自动 enabled=1**，日志把原因说清，避免误判为固件故障。
+log "提示：PassWall 未自动启用（固件不含节点）。启用三步：节点订阅→添加并更新 / 节点列表→选节点 / 基本设置→勾选启用；开机自启另有 60s 延时。详见仓库 PassWall_启用引导.md"
 
 rm -f /tmp/luci-indexcache
 exit 0

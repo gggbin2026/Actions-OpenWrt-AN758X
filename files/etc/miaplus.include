@@ -1,0 +1,11 @@
+#!/bin/sh
+# 上游 fw3 的 firewall include：原内容是 `/etc/init.d/miaplus restart`，
+# 由 luci-miaplus 的 uci-defaults 注册成 `config include type=script reload=1`。
+# fw4 的 run_includes() 会执行所有 type=script 的 include —— 于是每次
+# fw4 reload（开机 / PassWall 重启 / 任何防火墙变更）都会重跑一遍旧
+# iptables init，产生一堆 command not found 噪声，还可能在 iptables-nft
+# 兼容层上把 53 端口劫持，和 PassWall 抢 DNS。
+#
+# 99-zz-miaplus 会直接删掉 firewall.miaplus 这段 include；本文件留空
+# 只是双保险：万一 include 还在，执行它也是个无害的 no-op。
+exit 0

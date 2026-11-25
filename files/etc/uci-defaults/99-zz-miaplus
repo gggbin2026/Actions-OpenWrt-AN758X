@@ -1,0 +1,90 @@
+#!/bin/sh
+# 99-zz-miaplus —— 把 fw3 老包切到 fw4/nftables 后端并设为自启
+# ---------------------------------------------------------------------------
+# 上游 luci-app-accesscontrol-plus 的 uci-defaults(50_luci-miaplus) 会注册
+#   config include 'miaplus' / type=script / path=/etc/miaplus.include / reload=1
+# fw4 的 run_includes() 会执行它（内容 = /etc/init.d/miaplus restart），
+# 于是每次防火墙 reload 都重跑 iptables 老 init。这里把它删掉。
+#
+# 然后：补执行位 → 写 cron（nftables 没有时间段匹配，靠每分钟重算）→
+#       enable + restart → 清 LuCI 索引缓存。
+# 幂等，可重复执行；全程 logger，不用 ::warning:: / ::error:: 注解语法。
+# ---------------------------------------------------------------------------
+log() { logger -t miaplus-init "$@"; }
+
+# ---- 1) 删掉 fw3 的 script include（关键：别让 fw4 再执行旧 init）--------
+if uci -q get firewall.miaplus >/dev/null 2>&1; then
+  uci -q delete firewall.miaplus
+  uci -q commit firewall
+  log "已删除 firewall.miaplus（fw3 script include，fw4 会执行它导致 DNS 冲突）"
+else
+  log "firewall.miaplus 不存在，无需删除"
+fi
+
+# ---- 2) 出厂配置：缺了就建（enable=1，空规则 = 运行状态、不限制）---------
+if [ ! -f /etc/config/miaplus ]; then
+  mkdir -p /etc/config
+  cat > /etc/config/miaplus <<'EOF'
+config basic
+	option enable '1'
+	option strict '0'
+	option ipv6enable '0'
+
+config templates
+	option enable '1'
+	option title 'default'
+EOF
+  log "/etc/config/miaplus 不存在，已建默认（enable=1 / 空规则）"
+else
+  # 老包自带 enable='0'：状态改成看 nft 表后，enable=0 会让人以为没启动。
+  # 首次开机把它打开（空表 = 不限制任何客户端，安全）。
+  _en="$(uci -q get miaplus.@basic[0].enable 2>/dev/null)"
+  if [ "$_en" != "1" ]; then
+    uci -q set miaplus.@basic[0].enable='1'
+    uci -q commit miaplus
+    log "miaplus enable=${_en:-空} -> 1（空规则，不限制任何客户端）"
+  else
+    log "miaplus enable=1 已就绪，保留用户配置"
+  fi
+fi
+
+# ---- 3) 补执行位 ----------------------------------------------------------
+for f in /etc/init.d/miaplus /usr/sbin/miaplus-apply /etc/miaplus.include; do
+  [ -f "$f" ] && chmod +x "$f" 2>/dev/null || true
+done
+
+# ---- 4) cron：每分钟按当前星期/时刻重建 nft 规则 --------------------------
+# 不直接覆盖 /etc/crontabs/root，避免冲掉别的插件的定时任务
+CRON_LINE='* * * * * /usr/sbin/miaplus-apply >/dev/null 2>&1'
+if command -v crontab >/dev/null 2>&1; then
+  _tmp="$(mktemp)"
+  crontab -l 2>/dev/null | grep -vF '/usr/sbin/miaplus-apply' > "$_tmp" || true
+  echo "$CRON_LINE" >> "$_tmp"
+  crontab "$_tmp" 2>/dev/null || true
+  rm -f "$_tmp"
+  log "已注册 cron：每分钟重算上网时间规则"
+else
+  log "提示：无 crontab 命令，规则仅在服务启动/reload 时刷新（时间段切换不精确）"
+fi
+
+# ---- 5) enable + restart --------------------------------------------------
+if [ -x /etc/init.d/miaplus ]; then
+  /etc/init.d/miaplus enable 2>/dev/null || true
+  /etc/init.d/miaplus restart 2>/dev/null || true
+  sleep 1
+  if command -v nft >/dev/null 2>&1 && nft list table inet miaplus >/dev/null 2>&1; then
+    log "✅ 服务已自启，table inet miaplus 存在（LuCI 应显示 RUNNING）"
+  else
+    log "⚠ table inet miaplus 未建立，请查 logread -e miaplus"
+  fi
+else
+  log "警告：/etc/init.d/miaplus 不存在（包未编入？）"
+fi
+
+# ---- 6) 清 LuCI 索引缓存，让状态页用新 controller -----------------------
+rm -f /tmp/luci-indexcache /tmp/luci-indexcache.* 2>/dev/null
+[ -d /tmp/luci-modulecache ] && rm -rf /tmp/luci-modulecache/* 2>/dev/null
+[ -x /etc/init.d/rpcd ] && /etc/init.d/rpcd restart >/dev/null 2>&1 || true
+
+log "完成：nftables 后端，不碰 53 端口，与 PassWall 无冲突"
+exit 0

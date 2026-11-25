@@ -1,0 +1,128 @@
+#!/bin/sh
+# /usr/sbin/miaplus-apply —— 上网时间控制 Plus 的 nftables 后端
+# ---------------------------------------------------------------------------
+# 背景：kingyond/luci-app-accesscontrol-plus 是 **fw3/iptables 时代**的包：
+#   · controller 用 `iptables -L INPUT | grep MIAPLUS` 判状态
+#   · init.d 全靠 `iptables -N MIAPLUS` / `-j REDIRECT --to-ports 53`
+# 本固件是 fw4 + 纯 nftables（config 里连 iptables 包都没有），
+# 所以 iptables 命令根本不存在 → 状态永远「未运行」、规则也从不生效。
+# 更糟的是它那条 `REDIRECT --to-ports 53` 会劫持 DNS，跟 PassWall 的
+# dns_redirect=1 / chinadns-ng 抢 53 —— 这正是两个插件一起"起不来"的关联点。
+#
+# 本脚本保留 LuCI 那套 UCI 配置格式（/etc/config/miaplus 的
+# basic / templates / macbind / 模板规则段），把后端换成：
+#   table inet miaplus { chain forward { type filter hook forward ... } }
+# 按 MAC 在 **forward** 上 drop，真正断网（比原版只拦 DNS 更彻底），
+# 且**完全不碰 53 端口**，不再和 PassWall 冲突。
+#
+# ★ nftables 没有内建的时间段匹配（xt_time 不属于 nft），所以靠 cron
+#   每分钟重跑本脚本，按「当前星期 + 当前时刻」重建整条 chain。
+#   精度 1 分钟，与界面里的 HH:MM 一致。
+#
+# UCI 字段（与上游 CBI 对齐）：
+#   basic   : enable / strict / ipv6enable
+#   templates(匿名，多个) : enable / title  —— section 名即模板 ID
+#   <模板ID>(匿名，多个)  : enable / timeon / timeoff / z1..z7
+#   macbind (匿名，多个)  : enable / macaddr / template(=模板ID)
+#   Flag 的 rmempty=true：zN 未写 = 沿用 CBI default '1'（该天允许）
+# ---------------------------------------------------------------------------
+
+log() { logger -t miaplus "$@"; }
+
+CFG=/etc/config/miaplus
+CHAIN_FILE=/tmp/miaplus.nft
+[ -f "$CFG" ] || { log "配置 $CFG 不存在，跳过"; exit 0; }
+
+command -v nft >/dev/null 2>&1 || { log "nft 命令不存在（非 fw4 固件？），跳过"; exit 0; }
+
+# ---- 当前时间：星期 1=Mon..7=Sun（与 z1..z7 完全对齐）、分钟数 ----
+# ⚠ busybox ash / dash 的 $(( )) **不支持 bash 的 10# 前缀**，
+#   date +%H 返回 "08" 直接算会被当八进制报错。纯 POSIX 去前导零。
+strip0() { _v="$1"; while [ "${_v#0}" != "$_v" ]; do _v="${_v#0}"; done; [ -n "$_v" ] || _v=0; echo "$_v"; }
+
+DOW="$(date +%u)"
+NOW="$(date +%H:%M)"
+NOW_MIN=$(( $(strip0 "${NOW%%:*}") * 60 + $(strip0 "${NOW##*:}") ))
+
+u() { uci -q get "$1" 2>/dev/null; }
+
+# in_window <timeon> <timeoff>
+# 支持跨午夜（如 22:00-06:00）：on>off 时按两段判断
+in_window() {
+  _on="$1"; _off="$2"
+  case "$_on" in *:*) ;; *) return 1 ;; esac
+  case "$_off" in *:*) ;; *) return 1 ;; esac
+  _a=$(( $(strip0 "${_on%%:*}") * 60 + $(strip0 "${_on##*:}") ))
+  _b=$(( $(strip0 "${_off%%:*}") * 60 + $(strip0 "${_off##*:}") ))
+  if [ "$_a" -le "$_b" ]; then
+    [ "$NOW_MIN" -ge "$_a" ] && [ "$NOW_MIN" -le "$_b" ]
+  else
+    [ "$NOW_MIN" -ge "$_a" ] || [ "$NOW_MIN" -le "$_b" ]
+  fi
+}
+
+# template_allows <模板ID> —— 该模板当前是否放行（任一启用规则匹配即可）
+template_allows() {
+  _t="$1"
+  _i=0
+  while [ "$_i" -lt 100 ]; do
+    _en="$(u "miaplus.@${_t}[${_i}].enable")"
+    [ -z "$_en" ] && break
+    if [ "$_en" = "1" ]; then
+      _z="$(u "miaplus.@${_t}[${_i}].z${DOW}")"
+      # 未写 = CBI default 1（允许）；显式 '0' 才排除
+      if [ "$_z" != "0" ] && in_window "$(u "miaplus.@${_t}[${_i}].timeon")" "$(u "miaplus.@${_t}[${_i}].timeoff")"; then
+        return 0
+      fi
+    fi
+    _i=$((_i + 1))
+  done
+  return 1
+}
+
+EN="$(u miaplus.@basic[0].enable)"
+[ -z "$EN" ] && EN=0
+
+# ---- 生成 nft 片段 -------------------------------------------------------
+{
+  echo 'table inet miaplus'
+  echo 'flush table inet miaplus'
+  echo 'table inet miaplus {'
+  echo '    chain forward {'
+  echo '        type filter hook forward priority 0; policy accept;'
+
+  if [ "$EN" = "1" ]; then
+    _i=0
+    BLOCKED=0
+    while [ "$_i" -lt 100 ]; do
+      _en="$(u "miaplus.@macbind[${_i}].enable")"
+      [ -z "$_en" ] && break
+      _mac="$(u "miaplus.@macbind[${_i}].macaddr")"
+      _tpl="$(u "miaplus.@macbind[${_i}].template")"
+      if [ "$_en" = "1" ] && [ -n "$_mac" ] && [ -n "$_tpl" ]; then
+        # MAC 规范化成小写冒号分隔，nft 的 ether saddr 大小写不敏感
+        _mac="$(printf '%s' "$_mac" | tr 'A-F-' 'a-f:')"
+        if ! template_allows "$_tpl"; then
+          echo "        ether saddr $_mac drop comment \"miaplus: $_tpl outside schedule\""
+          BLOCKED=$((BLOCKED + 1))
+        fi
+      fi
+      _i=$((_i + 1))
+    done
+    LOGMSG="enable=1  当前 ${NOW} 周${DOW}  阻断 ${BLOCKED} 个 MAC"
+  else
+    LOGMSG="enable=0  未启用，chain 为空（不限制任何客户端）"
+  fi
+
+  echo '    }'
+  echo '}'
+} > "$CHAIN_FILE"
+log "${LOGMSG}"
+
+# ---- 原子加载（先静态校验，避免把整个 ruleset 搞挂）----------------------
+if ! nft -c -f "$CHAIN_FILE" >/dev/null 2>&1; then
+  log "nft 静态校验失败，不加载（保留上一次规则）"
+  exit 0
+fi
+nft -f "$CHAIN_FILE" 2>/dev/null || log "nft 加载失败（保留上一次规则）"
+exit 0

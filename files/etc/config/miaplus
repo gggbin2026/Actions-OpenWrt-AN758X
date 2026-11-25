@@ -1,0 +1,8 @@
+config basic
+	option enable '1'
+	option strict '0'
+	option ipv6enable '0'
+
+config templates
+	option enable '1'
+	option title 'default'

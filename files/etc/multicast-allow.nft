@@ -1,0 +1,26 @@
+# /etc/multicast-allow.nft —— 显式放行 IGMP 与组播流量
+# ---------------------------------------------------------------------------
+# 由 99-zz-igmp-snooping 注册成 fw4 的
+#   config include / type nftables / position ruleset-pre
+# 每次 fw4 reload / 开机都会重放，不会随重启丢失。
+#
+# 为什么要显式写：DHCP Snooping 已经在 bridge 家族挂了 prerouting 表，
+# 而 WAN/LAN 之间还跑着 PassWall 的透明代理规则。这里在 inet input 上
+# 明确放行 IGMP（IP 协议号 2）与 224.0.0.0/4，保证：
+#   · 客户端的 IGMP Report / Leave 能到本机（igmpproxy / omcproxy 要靠它加组）
+#   · 本机发出的查询与组播流不被任何后续规则误伤
+# 默认 policy 是 accept，本表只是把「组播一定通」写死、便于 nft list 核对。
+#
+# ⚠ 注册前会 `nft -c -f` 静态校验；语法不通过就不注册 include，
+#   保证 fw4 主 ruleset（含 NAT）一定能起来。
+# ---------------------------------------------------------------------------
+
+table inet multicast_allow
+flush table inet multicast_allow
+table inet multicast_allow {
+    chain input {
+        type filter hook input priority -10; policy accept;
+        ip protocol 2 accept comment "Allow IGMP (MLD/IGMP control for multicast)"
+        ip daddr 224.0.0.0/4 accept comment "Allow IPv4 multicast traffic"
+    }
+}
