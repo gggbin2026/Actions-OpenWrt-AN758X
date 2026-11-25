@@ -816,10 +816,14 @@ jobs:
 
           # ---------------------------------------------------------------
           # Homebox 三件套硬校验（2026-11-24 恢复）
-          #   用户之前遇到过 "The Homebox service is not running"：
-          #   v1.0.1 是 Rust 版，启动必须带 `serve` 子命令；老 init 裸跑
-          #   /usr/bin/homebox 只会打印帮助立刻退出 → procd 反复 respawn。
-          #   三件套缺任一，菜单在、服务起不来，等于白装。
+          #   2026-11-25 用户复报 "The Homebox service is not running"。
+          #   查上游 selfcan/luci-app-homebox 的 CBI（s.anonymous=true）与
+          #   sirpdboy/homebox 的 main.rs 后确认三个根因：
+          #     ① init.d 用 `config_get ... homebox ...`（按 section 名读），
+          #        LuCI 点一次「全局设置→保存」就把 section 改成匿名，读不到 → 不启动
+          #     ② `--help` 探测的 else 分支 `$BIN --host --port` 被 clap 拒绝 → 立即退出
+          #     ③ v1.0.1 其实**不带参数也会启动**（main.rs:209，默认 0.0.0.0:3300）
+          #   现在要求：匿名 section + uci 按 type 索引 + 裸跑 + 首启 restart。
           # ---------------------------------------------------------------
           if grep -q '^CONFIG_PACKAGE_luci-app-homebox=y' .config 2>/dev/null; then
             for f in files/etc/config/homebox files/etc/init.d/homebox \
@@ -833,11 +837,41 @@ jobs:
               echo "::error::files/etc/config/homebox 没开 enabled=1，Homebox 不会自启"
               exit 1
             fi
-            if ! grep -q 'serve --host' files/etc/init.d/homebox; then
-              echo "::error::files/etc/init.d/homebox 缺少 serve 子命令自适应（v1.0.1 Rust 版裸跑会立刻退出）"
+            # 2026-11-25 修正：上一版要求 init.d 里出现 `serve --host`，
+            # 但那个 `--help` 探测的 else 分支 `$BIN --host --port` 是坏的
+            # （v1.0.1 的 --host/--port 只属于 serve 子命令，顶层 clap 不认），
+            # 一旦探测落空进程立刻退出 → pidof 抓不到 → LuCI 红字。
+            # 上游 main.rs:209 证实**不带参数即以 0.0.0.0:3300 启动**，
+            # 所以现在要求：裸跑 `$BIN`、按 type 索引读 enabled、禁止 --help 探测。
+            if ! grep -qF 'procd_set_param command "$BIN"' files/etc/init.d/homebox; then
+              echo "::error::files/etc/init.d/homebox 缺少裸跑启动命令（v1.0.1 不带参数即启动 0.0.0.0:3300）"
               exit 1
             fi
-            echo "✅ Homebox 三件套齐备：默认自启 :3300（serve 子命令自适应）"
+            # 只扫非注释行：init.d 的说明注释里也会提到这个参数，别误伤
+            if grep -v '^[[:space:]]*#' files/etc/init.d/homebox | grep -qF -- '--help'; then
+              echo "::error::files/etc/init.d/homebox 仍用 help 参数探测子命令（else 分支 --host/--port 会让 clap 报错退出），请删掉"
+              exit 1
+            fi
+            if ! grep -qF 'homebox.@homebox[0].enabled' files/etc/init.d/homebox; then
+              echo "::error::files/etc/init.d/homebox 没按 type 索引读 enabled（用 config_get ... homebox ... 会在 LuCI 保存后读不到）"
+              exit 1
+            fi
+            # 出厂配置必须是匿名 section：LuCI CBI 是 s.anonymous=true，
+            # 命名 section 会让「全局设置」显示未勾选，点保存就写坏 enabled。
+            if grep -qE '^config homebox [^#]' files/etc/config/homebox; then
+              echo "::error::files/etc/config/homebox 是命名 section，LuCI CBI 的 anonymous=true 不认，必须改成 'config homebox'（匿名）"
+              exit 1
+            fi
+            if ! grep -q '^config homebox$' files/etc/config/homebox; then
+              echo "::error::files/etc/config/homebox 没有匿名 section 'config homebox'"
+              exit 1
+            fi
+            # 首启脚本必须真的 restart（只 enable 的话首启 uci-defaults 跑完仍 not running）
+            if ! grep -qF '/etc/init.d/homebox restart' files/etc/uci-defaults/99-zz-homebox; then
+              echo "::error::99-zz-homebox 只 enable 没 restart，首次开机后 LuCI 仍会显示 not running"
+              exit 1
+            fi
+            echo "✅ Homebox 三件套齐备：匿名 section + 按 type 读 enabled + 裸跑自启 :3300"
           fi
 
           # ---------------------------------------------------------------
