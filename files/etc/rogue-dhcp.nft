@@ -1,6 +1,6 @@
 # /etc/rogue-dhcp.nft —— DHCP Snooping：拦截私设 DHCP 服务器
 # ---------------------------------------------------------------------------
-# 由 /etc/config/firewall 的 `config include ... position 'ruleset-pre'`
+# 由 /etc/config/firewall 的 `config include ... position 'ruleset-prepend'`
 # 在每次 fw4 reload / 开机启动时加载（见 99-zz-dhcp-snooping）。
 #
 # 原理：

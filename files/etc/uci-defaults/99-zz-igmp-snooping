@@ -94,7 +94,7 @@ EOF
     uci set firewall.multicast_allow_include.enabled='1'
     uci set firewall.multicast_allow_include.type='nftables'
     uci set firewall.multicast_allow_include.path="$NFT_FILE"
-    uci set firewall.multicast_allow_include.position='ruleset-pre'
+    uci set firewall.multicast_allow_include.position='ruleset-prepend'
     uci commit firewall
     log "已注册 fw4 include：IGMP(协议2) + 224.0.0.0/4 显式放行"
   fi

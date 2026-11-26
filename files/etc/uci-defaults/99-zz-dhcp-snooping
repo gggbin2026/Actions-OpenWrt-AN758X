@@ -3,9 +3,9 @@
 # ---------------------------------------------------------------------------
 # 为什么必须走 fw4 的 include：独立 nftables 表不会被 OpenWrt 开机自动
 # 恢复，只在本次运行里存在。用 `config include type nftables
-# position ruleset-pre`，fw4 每次生成 ruleset（开机 / reload）都会把
+# position ruleset-prepend`，fw4 每次生成 ruleset（开机 / reload）都会把
 # /etc/rogue-dhcp.nft 拼到最前面，规则随防火墙生命周期自动重建。
-#   · ruleset-pre 在 fw4 的 `flush table inet fw4` 之前，互不干扰
+#   · ruleset-prepend 在 fw4 的 `flush table inet fw4` 之前，互不干扰
 #   · nft 文件里 `table` + `flush table` 防重复定义
 #   · 不按接口名过滤 → 有线 LAN 与 WiFi 桥端口一视同仁
 #
@@ -63,9 +63,9 @@ uci set firewall.rogue_dhcp_include=include
 uci set firewall.rogue_dhcp_include.enabled='1'
 uci set firewall.rogue_dhcp_include.type='nftables'
 uci set firewall.rogue_dhcp_include.path='/etc/rogue-dhcp.nft'
-uci set firewall.rogue_dhcp_include.position='ruleset-pre'
+uci set firewall.rogue_dhcp_include.position='ruleset-prepend'
 uci commit firewall
-log "已注册 fw4 include: position='ruleset-pre' type='nftables' path='$NFT_FILE'"
+log "已注册 fw4 include: position='ruleset-prepend' type='nftables' path='$NFT_FILE'"
 
 # --- 3) 立即重载一次；首启时 firewall 未就绪会失败，但配置已 commit，
 #        下次开机 / 防火墙启动时自然会加载，不用重试，也不删 include -----

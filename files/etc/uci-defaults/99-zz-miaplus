@@ -56,16 +56,21 @@ done
 # ---- 4) cron：每分钟按当前星期/时刻重建 nft 规则 --------------------------
 # 不直接覆盖 /etc/crontabs/root，避免冲掉别的插件的定时任务
 CRON_LINE='* * * * * /usr/sbin/miaplus-apply >/dev/null 2>&1'
-if command -v crontab >/dev/null 2>&1; then
-  _tmp="$(mktemp)"
-  crontab -l 2>/dev/null | grep -vF '/usr/sbin/miaplus-apply' > "$_tmp" || true
-  echo "$CRON_LINE" >> "$_tmp"
-  crontab "$_tmp" 2>/dev/null || true
-  rm -f "$_tmp"
-  log "已注册 cron：每分钟重算上网时间规则"
-else
-  log "提示：无 crontab 命令，规则仅在服务启动/reload 时刷新（时间段切换不精确）"
-fi
+CRONTAB=/etc/crontabs/root
+# 2026-11-26 核查修正：原来用 `crontab` applet 写，但 busybox 不一定编了
+# 这个 applet；且 crond 的 start_service() 在 /etc/crontabs/ 为空时
+# 直接 return 1。改成**直接写 /etc/crontabs/root**（busybox crond 读的
+# 就是它），幂等去重、chmod 600，并在 99-zzz-services-boot 里统一
+# enable + restart cron。双保险，不依赖任何 applet 是否存在。
+mkdir -p /etc/crontabs
+[ -f "$CRONTAB" ] || : > "$CRONTAB"
+_tmp="$(mktemp)"
+grep -vF '/usr/sbin/miaplus-apply' "$CRONTAB" 2>/dev/null > "$_tmp" || true
+echo "$CRON_LINE" >> "$_tmp"
+cat "$_tmp" > "$CRONTAB"
+rm -f "$_tmp"
+chmod 600 "$CRONTAB" 2>/dev/null || true
+log "已写入 $CRONTAB：每分钟重算上网时间规则（cron 服务由 99-zzz-services-boot 保障）"
 
 # ---- 5) enable + restart --------------------------------------------------
 if [ -x /etc/init.d/miaplus ]; then

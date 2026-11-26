@@ -1,0 +1,102 @@
+#!/bin/sh
+# ============================================================================
+# 99-zzz-services-boot —— 服务自启兜底（字母序排在所有 99-zz-* 之后）
+#
+# 2026-11-26 全仓库「插件能否正常启动」核查发现的问题，统一在这里收口：
+#
+#  ① cron：OpenWrt busybox 的 /etc/init.d/cron 的 start_service() 里有
+#     `[ -z "$(ls /etc/crontabs/)" ] && return 1` —— crontab 目录空就不起；
+#     而 99-zz-miaplus 依赖「每分钟重算上网时间规则」、taskplan 依赖
+#     「定时任务」，两者都靠 crond。仓库里原先**没有任何 enable cron**，
+#     且 99-zz-miaplus 用的是 `crontab` applet（busybox 可能没编这个
+#     applet）。这里显式 enable + 直接写 /etc/crontabs/root（幂等）+ 启动。
+#
+#  ② sysntpd：99-z-custom-defaults 只写了 system.ntp.enable_server=1 等
+#     UCI，没显式 enable/restart。显式做一次，保证 UDP 123 真的在监听。
+#
+#  ③ rtp2httpd：上游出厂 config 是 `option disabled '1'`，包编进固件
+#     服务也不自启。files/etc/config/rtp2httpd 已覆盖成 disabled=0，
+#     这里再 enable + restart，端口 5140。
+#
+#  ④ fw4 include：99-zz-dhcp-snooping 会 fw4 reload，但排在它后面的
+#     99-zz-igmp-snooping 注册的 multicast_allow_include 没有 reload，
+#     首次开机要等下次防火墙变更才生效。这里统一 reload 一次。
+#
+# 全程条件式：服务/命令不存在就安静跳过，不 exit 1、不输出
+# ::error:: / ::warning::（那是 Actions 注解，路由器上只会变成噪声）。
+# 幂等，可重复执行。
+# ============================================================================
+
+log() { logger -t services-boot "$@"; }
+
+# ---------------------------------------------------------------------------
+# 1) cron —— miaplus 时间段切换 / taskplan 定时任务的前提
+# ---------------------------------------------------------------------------
+CRONTAB=/etc/crontabs/root
+MIAPLUS_LINE='* * * * * /usr/sbin/miaplus-apply >/dev/null 2>&1'
+
+if [ -x /etc/init.d/cron ]; then
+  mkdir -p /etc/crontabs
+  [ -f "$CRONTAB" ] || : > "$CRONTAB"
+  # 幂等：先去掉旧行再追加（99-zz-miaplus 可能已用 crontab 命令写过）
+  TMP="$(mktemp)"
+  grep -vF '/usr/sbin/miaplus-apply' "$CRONTAB" 2>/dev/null > "$TMP" || true
+  echo "$MIAPLUS_LINE" >> "$TMP"
+  cat "$TMP" > "$CRONTAB"
+  rm -f "$TMP"
+  chmod 600 "$CRONTAB" 2>/dev/null || true
+  /etc/init.d/cron enable 2>/dev/null || true
+  /etc/init.d/cron restart 2>/dev/null || true
+  log "cron 已 enable + restart；$CRONTAB 含 miaplus-apply 每分钟一行"
+else
+  log "提示：/etc/init.d/cron 不存在（busybox 未编 crond？），miaplus 时间段切换将只在服务重启时刷新"
+fi
+
+# ---------------------------------------------------------------------------
+# 2) sysntpd —— 本机 NTP 服务端（UDP 123，DHCP option 42 指向 192.168.1.1）
+# ---------------------------------------------------------------------------
+if [ -x /etc/init.d/sysntpd ]; then
+  /etc/init.d/sysntpd enable 2>/dev/null || true
+  /etc/init.d/sysntpd restart 2>/dev/null || true
+  log "sysntpd 已 enable + restart（enable_server=1，监听 UDP 123）"
+else
+  log "提示：/etc/init.d/sysntpd 不存在，NTP 服务端由 99-z-custom-defaults 的 UCI 兜底"
+fi
+
+# ---------------------------------------------------------------------------
+# 3) rtp2httpd —— 组播转 HTTP（:5140）
+# ---------------------------------------------------------------------------
+if [ -x /etc/init.d/rtp2httpd ]; then
+  if [ -f /etc/config/rtp2httpd ]; then
+    uci -q set rtp2httpd.@rtp2httpd[0].disabled='0'
+    uci -q commit rtp2httpd
+  fi
+  /etc/init.d/rtp2httpd enable 2>/dev/null || true
+  /etc/init.d/rtp2httpd restart 2>/dev/null || true
+  log "rtp2httpd 已 enable + restart（:5140，需在 LuCI 填 upstream_interface 才有节目源）"
+else
+  log "提示：rtp2httpd 未安装或非本机型，跳过"
+fi
+
+# ---------------------------------------------------------------------------
+# 4) 统一 reload 一次：让 99-zz-igmp-snooping 注册的组播放行 include
+#    在首次开机就生效（不必等下一次防火墙变更）
+# ---------------------------------------------------------------------------
+if command -v fw4 >/dev/null 2>&1; then
+  if fw4 reload >/dev/null 2>&1; then
+    log "fw4 reload 完成：rogue_dhcp / multicast_allow 两个 nftables include 均已加载"
+  else
+    log "提示：fw4 reload 此刻未成功（首启时序属正常），规则将在下次防火墙启动时加载"
+  fi
+fi
+
+# ---------------------------------------------------------------------------
+# 5) 说明：p910nd / USB 打印保持「插上打印机后在 LuCI 启用」
+#    —— 官方默认 disabled，空转会在无打印机时反复 respawn 刷日志，
+#      故不强制自启；LuCI「服务 → USB 打印服务器」勾选启用即可。
+#    DDNS 花生壳默认 enabled=0：要先填 Oray 账号/密码/域名。
+#    PassWall 默认 enabled=0：要先填订阅并选节点。
+#    igmpproxy / omcproxy：组播上游二选一，不自动启用，避免抢 IGMP 加入。
+# ---------------------------------------------------------------------------
+log "服务自启兜底完成（cron / sysntpd / rtp2httpd 已保障；其余按设计需用户配置）"
+exit 0

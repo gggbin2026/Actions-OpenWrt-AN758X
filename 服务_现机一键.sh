@@ -189,3 +189,47 @@ echo
 rm -f /tmp/luci-indexcache /tmp/luci-indexcache.* 2>/dev/null
 [ -x /etc/init.d/rpcd ] && /etc/init.d/rpcd restart >/dev/null 2>&1 || true
 echo "  ✅ LuCI 索引缓存已刷新，Ctrl+F5 刷新页面查看"
+
+echo
+echo "==================== 5) v13 服务自启兜底 ===================="
+# cron：miaplus 每分钟重算 + taskplan 定时都靠它
+CRONTAB=/etc/crontabs/root
+LINE='* * * * * /usr/sbin/miaplus-apply >/dev/null 2>&1'
+if [ -x /etc/init.d/cron ]; then
+  mkdir -p /etc/crontabs
+  [ -f "$CRONTAB" ] || : > "$CRONTAB"
+  T="$(mktemp)"; grep -vF '/usr/sbin/miaplus-apply' "$CRONTAB" 2>/dev/null > "$T" || true
+  echo "$LINE" >> "$T"; cat "$T" > "$CRONTAB"; rm -f "$T"
+  chmod 600 "$CRONTAB" 2>/dev/null || true
+  /etc/init.d/cron enable 2>/dev/null || true
+  /etc/init.d/cron restart 2>/dev/null || true
+  echo -n "  crond        : "; pidof crond >/dev/null 2>&1 && echo "✅ 运行中" || echo "⚠ 未起（查 logread）"
+else
+  echo "  ⚠ /etc/init.d/cron 不存在"
+fi
+# sysntpd：NTP 服务端
+if [ -x /etc/init.d/sysntpd ]; then
+  uci -q set system.ntp.enable_server='1'; uci -q commit system
+  /etc/init.d/sysntpd enable 2>/dev/null || true
+  /etc/init.d/sysntpd restart 2>/dev/null || true
+  echo -n "  ntpd :123   : "; pidof ntpd >/dev/null 2>&1 && echo "✅ 运行中" || echo "⚠ 未起"
+fi
+# rtp2httpd：上游默认 disabled=1
+if [ -x /etc/init.d/rtp2httpd ]; then
+  if [ -f /etc/config/rtp2httpd ]; then
+    uci -q set rtp2httpd.@rtp2httpd[0].disabled='0'
+    uci -q del_list rtp2httpd.@rtp2httpd[0].listen='5140' 2>/dev/null || true
+    uci -q add_list rtp2httpd.@rtp2httpd[0].listen='5140'
+    uci -q commit rtp2httpd
+  fi
+  /etc/init.d/rtp2httpd enable 2>/dev/null || true
+  /etc/init.d/rtp2httpd restart 2>/dev/null || true
+  echo -n "  rtp2httpd    : "; pidof rtp2httpd >/dev/null 2>&1 && echo "✅ 运行中 (:5140)" || echo "⚠ 未起（查 logread -e rtp2httpd）"
+else
+  echo "  rtp2httpd    : 未安装，跳过"
+fi
+# 统一 reload：让组播放行 include 生效
+command -v fw4 >/dev/null 2>&1 && fw4 reload >/dev/null 2>&1 && echo "  ✅ fw4 reload：rogue_dhcp / multicast_allow 两条 include 已加载"
+echo
+echo "  仍需手动配置：PassWall（订阅→选节点→勾启用）、花生壳 DDNS（Oray 账号）、"
+echo "                USB 打印（插打印机后在 LuCI 启用）、igmpproxy/omcproxy（组播上游二选一）"

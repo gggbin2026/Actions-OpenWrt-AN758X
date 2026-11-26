@@ -1,0 +1,25 @@
+# /etc/config/rtp2httpd —— 组播转 HTTP 单播（v3.17.2）出厂配置
+# ---------------------------------------------------------------------------
+# 上游 stackia/rtp2httpd/openwrt-support/rtp2httpd/files/rtp2httpd.conf
+# 默认写的是 `option disabled '1'`，包编进固件**服务也不会自启**。
+# 本文件覆盖包内 conffile，把服务默认拉起来：
+#   · disabled '0'  → init.d 的 `config_get_bool disabled` 不再 return 1
+#   · listen 5140   → 明确监听端口（上游 conf 里这行是注释掉的）
+#
+# ⚠ 服务能起来 ≠ 能看 IPTV：还需要在 LuCI「服务 → rtp2httpd」或本文件里
+#   填 `upstream_interface`（运营商组播上行接口）与节目源。
+#   没配源时访问 http://192.168.1.1:5140 只会得到空列表/404，属正常。
+#
+# 与组播双代理的关系：rtp2httpd 只负责「把已加入的组播流转成 HTTP」，
+# 不负责向 WAN 订阅；订阅由 igmpproxy（IPv4 IPTV 直放）或 omcproxy
+# （ONU 菜单组播路径）二选一完成，两个别同时在同一上行启用。
+# ---------------------------------------------------------------------------
+
+config rtp2httpd
+	option disabled '0'
+	option respawn '1'
+	list listen '5140'
+	# 按运营商实际情况填写，例如：
+	# option upstream_interface 'iptv'
+	# option verbose '0'
+	# option maxclients '5'

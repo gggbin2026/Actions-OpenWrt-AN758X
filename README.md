@@ -324,3 +324,20 @@ logread -e miaplus
 不是故障。三步：**节点订阅 → 添加并更新 → 节点列表选节点 → 基本设置勾「启用」**
 （开机自启另有 60 秒延时）。首页「GitHub 连接失败」是浏览器直连测试，不用管。
 完整说明见 **`PassWall_启用引导.md`**。
+
+
+---
+
+## 服务启停速查（2026-11-26）
+
+**开箱自启**：cron、sysntpd（NTP :123）、Homebox（:3300）、上网时间控制 Plus
+（nftables 后端，cron 每分钟重算）、rtp2httpd（:5140）、ttyd / FastNet / Vantage /
+watchdog、DHCP Snooping 与 IGMP Snooping 两条 nft 规则。由
+`files/etc/uci-defaults/99-zzz-services-boot` 统一兜底。
+
+**按设计需手动启用**（不是故障）：PassWall（订阅 → 选节点 → 勾启用）、
+花生壳 DDNS（填 Oray 账号/域名）、USB 打印 p910nd（插打印机后在 LuCI 启用）、
+igmpproxy / omcproxy（组播上游二选一，别同时开）、rtp2httpd 节目源
+（填 `upstream_interface`）。
+
+完整清单、端口表、验证命令见 **`固件配置与服务总览.md`**。

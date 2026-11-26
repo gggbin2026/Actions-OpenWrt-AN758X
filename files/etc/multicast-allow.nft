@@ -1,7 +1,7 @@
 # /etc/multicast-allow.nft —— 显式放行 IGMP 与组播流量
 # ---------------------------------------------------------------------------
 # 由 99-zz-igmp-snooping 注册成 fw4 的
-#   config include / type nftables / position ruleset-pre
+#   config include / type nftables / position ruleset-prepend
 # 每次 fw4 reload / 开机都会重放，不会随重启丢失。
 #
 # 为什么要显式写：DHCP Snooping 已经在 bridge 家族挂了 prerouting 表，
