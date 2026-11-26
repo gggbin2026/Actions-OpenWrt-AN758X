@@ -968,11 +968,12 @@ jobs:
           fi
 
           # PassWall 启用引导（2026-11-25 23:43 修正）
-          #   ⚠ 上一版在这里硬校验 `PassWall_启用引导.md` 存在且含
+          #   ⚠ 上一版在这里硬校验一份根目录说明文档存在且含
           #     ENABLED_DEFAULT_ACL，缺了就 exit 1。**文件其实一直在仓库根目录**，
           #     但本步骤 cwd 是 `$BUILD_ROOT/openwrt`（见 Load custom
           #     configuration 里的 cd），相对路径只看得到 openwrt/files/ 与
           #     openwrt/.config，看不到仓库根的 .md → 23:43 被误判为「缺文件」。
+          #     该文档现已合并进 `固件修复与配置总览.md`（仓库根目录只留 3 个 .md）。
           #     （上一轮误以为网页上传漏传中文名文件，是核对命令把中文路径
           #      八进制转义后 grep 漏了，特此更正。）
           #   纯文档不是编译/运行必需品，不该阻断整轮编译：改为非阻断日志，
@@ -992,16 +993,24 @@ jobs:
           if [ ! -f "$BOOT" ]; then
             echo "::warning::缺 $BOOT：cron / sysntpd / rtp2httpd 自启与 fw4 include 首启生效无兜底"
           else
-            for KW in '/etc/init.d/cron enable' '/etc/init.d/sysntpd enable'                       '/etc/init.d/rtp2httpd enable' 'fw4 reload' '/etc/crontabs/root'; do
+            for KW in '/etc/init.d/cron enable' '/etc/init.d/sysntpd enable'                       '/etc/init.d/rtp2httpd enable' '/etc/init.d/p910nd enable' 'fw4 reload' '/etc/crontabs/root'; do
               grep -qF "$KW" "$BOOT" || echo "::warning::99-zzz-services-boot 缺关键项: $KW"
             done
-            echo "✅ 服务自启兜底齐备：cron / sysntpd / rtp2httpd / fw4 include 统一 reload"
+            echo "✅ 服务自启兜底齐备：cron / sysntpd / rtp2httpd / p910nd / fw4 include 统一 reload"
           fi
           if grep -q '^CONFIG_PACKAGE_rtp2httpd=y' .config 2>/dev/null; then
             if [ ! -f files/etc/config/rtp2httpd ] || ! grep -q "disabled '0'" files/etc/config/rtp2httpd; then
               echo "::warning::rtp2httpd 出厂配置缺 disabled='0'：上游默认是 1，服务不会自启"
             else
-              echo "✅ rtp2httpd 出厂默认启用（:5140，节目源需用户填 upstream_interface）"
+              # 2026-11-26：端口统一 4022。两处任一漏改都只发 warning、不阻断编译
+              # （改端口不该让整轮编译挂掉，但要能在日志里一眼看出不一致）。
+              if ! grep -q "list listen '4022'" files/etc/config/rtp2httpd; then
+                echo "::warning::rtp2httpd 出厂配置未写 list listen '4022'（端口改为 4022 后漏改）"
+              fi
+              if [ -f "$BOOT" ] && ! grep -q "listen='4022'" "$BOOT"; then
+                echo "::warning::99-zzz-services-boot 未强制 listen='4022'，升级保留配置时旧端口可能残留"
+              fi
+              echo "✅ rtp2httpd 出厂默认启用（:4022 唯一监听，节目源需用户填 upstream_interface）"
             fi
           fi
           for S in files/etc/uci-defaults/99-zz-dhcp-snooping                    files/etc/uci-defaults/99-zz-igmp-snooping; do
@@ -2426,8 +2435,8 @@ jobs:
             echo "| PassWall | **已装但未自动启用**（固件不预置节点，不是故障） |"
             echo "| 启用三步 | ① 节点订阅 → 填订阅 URL 并「更新」；② 节点列表 → 选一个节点（可先测延迟）；③ 基本设置 → 勾「启用」→ 保存并应用。开机自启另有 60 秒延时，手动启用等 10~30 秒刷新 |"
             echo "| 状态说明 | 首页 TCP / UDP / DNS「未运行」= 未配节点时的正常状态；HAPROXY「N/A」= 负载均衡未开；「GitHub 连接失败」是浏览器直连测试，不是插件状态 |"
-            echo "| 服务自启 | \`cron\`（上网时间控制每分钟重算 + 定时任务）、\`sysntpd\`（UDP 123）、\`rtp2httpd\`（:5140）、Homebox（:3300）、上网时间控制 Plus 均默认自启 |"
-            echo "| 需手动启用 | PassWall（填订阅→选节点→勾启用）、花生壳 DDNS（填 Oray 账号/域名）、USB 打印 p910nd（插打印机后在 LuCI 启用）、igmpproxy/omcproxy（组播上游二选一） |"
+            echo "| 服务自启 | \`cron\`（上网时间控制每分钟重算 + 定时任务）、\`sysntpd\`（UDP 123）、\`rtp2httpd\`（:4022）、Homebox（:3300）、p910nd USB 打印（:9100）、上网时间控制 Plus 均默认自启 |"
+            echo "| 需手动启用 | PassWall（填订阅→选节点→勾启用）、花生壳 DDNS（填 Oray 账号/域名）、igmpproxy/omcproxy（组播上游二选一）、rtp2httpd 节目源（填 upstream_interface） |"
             echo "| DNS | PassWall 独占（chinadns-ng 分流）；SmartDNS 已移除 |"
             echo "| 系统 DNS 服务 | **仅 \`dnsmasq\`**：只发 DHCP + 缓存，不配任何上游。**不是 DNS 插件**，删了 LAN 拿不到 IP、PassWall 也起不来 |"
             echo "| 主题 / 语言 | ARGON / 简体中文 |"

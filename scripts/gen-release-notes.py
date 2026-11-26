@@ -72,7 +72,7 @@ out.write('\n')
 stars = ' '.join('`%s`' % p for p in bhit[:6]) if bhit else '（无）'
 out.write('- 简体中文包：`%d` 个；关键服务 `%d` 个：%s%s\n' % (
     len(i18n), len(bhit), stars, ' 等' if len(bhit) > 6 else ''))
-out.write('- 完整变更与发布记录见仓库 `固件发布日志.md` / `RELEASES.md`。\n')
+out.write('- 完整配置 / 修复 / 核查 / 操作见仓库 `固件修复与配置总览.md`；逐次发布记录见 `RELEASES.md`。\n')
 out.write('\n')
 out.close()
 print('✅ Release 说明已追加插件表，实读 .config: %d 个 =y 包' % len(sel))

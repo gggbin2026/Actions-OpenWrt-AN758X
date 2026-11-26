@@ -23,7 +23,7 @@
 > | 出厂默认 | `192.168.1.1` / `root` `admin`、Asia/Shanghai、内网 NTP + option 42、IPv6 关闭、5G WiFi CN/HE160 |
 > | 发布 | 固件文件名末段 `YYYYMMDD-HHMM` 为编译日期（上海时间）；每次按时间新建 Release `fw-<机型>-<时间戳>-r<run>a<attempt>`，**只保留最近 5 次**；**下载页并列两个裸 `.itb`（刷机 + 救砖），不压缩、不用解压**，说明页只列机型/默认配置/插件 |
 >
-> 完整清单见 `固件发布日志.md` / `插件冲突排查报告.md` / `上传与核对说明.md`。
+> 配置 / 插件 / 服务启停 / 修复历史 / 核查方法 / 操作指引，全部见 **`固件修复与配置总览.md`**（唯一文档）。
 
 ## 快速开始
 
@@ -129,7 +129,7 @@ CI 只能证明「编译通过、镜像里固件齐全」，不能证明「加�
 | USB 打印 | `p910nd` / `printer-support` / `luci-app-usb-printer` + 全套 USB 内核模块 |
 | 主题 | `luci-theme-argon`（bootstrap 是 LuCI 基础主题，保留） |
 
-**简体中文包 14 个**。完整逐项见 `固件发布日志.md`。
+**简体中文包 15 个**。完整逐项见 `固件修复与配置总览.md`。
 
 ### 已移除 / 白开（别被旧文档骗）
 
@@ -297,7 +297,7 @@ openssl speed -evp chacha20-poly1305
 `ALL_PORTS_MROUTER=2` 可切到「每口都收全量组播」，但高码率 IPTV 会泛洪到 WiFi，慎用。
 
 组播 WAN 上游仍需 `igmpproxy` 或 `omcproxy` **二选一启用**（模板已给，不自动 enable）；
-详见 `上传与核对说明.md`。核对：
+详见 `固件修复与配置总览.md`。核对：
 `bridge mdb show`、`cat /sys/class/net/br-lan/bridge/multicast_querier`、
 `nft list table inet multicast_allow`。
 
@@ -323,7 +323,7 @@ logread -e miaplus
 `(enabled=1 且 NODE 有效)` 才启动代理。首页 TCP/UDP/DNS「未运行」是设计，
 不是故障。三步：**节点订阅 → 添加并更新 → 节点列表选节点 → 基本设置勾「启用」**
 （开机自启另有 60 秒延时）。首页「GitHub 连接失败」是浏览器直连测试，不用管。
-完整说明见 **`PassWall_启用引导.md`**。
+完整三步与状态说明见 **`固件修复与配置总览.md` 附录 A**。
 
 
 ---
@@ -331,13 +331,14 @@ logread -e miaplus
 ## 服务启停速查（2026-11-26）
 
 **开箱自启**：cron、sysntpd（NTP :123）、Homebox（:3300）、上网时间控制 Plus
-（nftables 后端，cron 每分钟重算）、rtp2httpd（:5140）、ttyd / FastNet / Vantage /
-watchdog、DHCP Snooping 与 IGMP Snooping 两条 nft 规则。由
+（nftables 后端，cron 每分钟重算）、rtp2httpd（**本版端口 4022**）、p910nd USB 打印
+（:9100，插上打印机即用）、ttyd / FastNet / Vantage / watchdog、DHCP Snooping 与
+IGMP Snooping 两条 nft 规则。由
 `files/etc/uci-defaults/99-zzz-services-boot` 统一兜底。
 
 **按设计需手动启用**（不是故障）：PassWall（订阅 → 选节点 → 勾启用）、
-花生壳 DDNS（填 Oray 账号/域名）、USB 打印 p910nd（插打印机后在 LuCI 启用）、
-igmpproxy / omcproxy（组播上游二选一，别同时开）、rtp2httpd 节目源
+花生壳 DDNS（填 Oray 账号/域名）、igmpproxy / omcproxy（组播上游二选一，别同时开）、
+rtp2httpd 节目源
 （填 `upstream_interface`）。
 
-完整清单、端口表、验证命令见 **`固件配置与服务总览.md`**。
+完整清单、端口表、验证命令见 **`固件修复与配置总览.md`**。

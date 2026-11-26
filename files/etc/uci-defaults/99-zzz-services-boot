@@ -16,7 +16,7 @@
 #
 #  ③ rtp2httpd：上游出厂 config 是 `option disabled '1'`，包编进固件
 #     服务也不自启。files/etc/config/rtp2httpd 已覆盖成 disabled=0，
-#     这里再 enable + restart，端口 5140。
+#     这里再 enable + restart，端口 4022。
 #
 #  ④ fw4 include：99-zz-dhcp-snooping 会 fw4 reload，但排在它后面的
 #     99-zz-igmp-snooping 注册的 multicast_allow_include 没有 reload，
@@ -64,19 +64,58 @@ else
 fi
 
 # ---------------------------------------------------------------------------
-# 3) rtp2httpd —— 组播转 HTTP（:5140）
+# 3) rtp2httpd —— 组播转 HTTP（:4022）
 # ---------------------------------------------------------------------------
 if [ -x /etc/init.d/rtp2httpd ]; then
   if [ -f /etc/config/rtp2httpd ]; then
     uci -q set rtp2httpd.@rtp2httpd[0].disabled='0'
+    # 2026-11-26 加固：端口改为 4022。跨版本升级若勾了「保留配置」，
+    # 旧 /etc/config/rtp2httpd 里可能仍留着旧端口（或其它 listen 值），
+    # 而 uci-defaults 不会重跑 —— 这里先删整个 list 再写唯一值，
+    # 保证无论出厂还是升级，监听端口都确定是 4022。
+    uci -q delete rtp2httpd.@rtp2httpd[0].listen 2>/dev/null || true
+    uci -q add_list rtp2httpd.@rtp2httpd[0].listen='4022'
     uci -q commit rtp2httpd
   fi
   /etc/init.d/rtp2httpd enable 2>/dev/null || true
   /etc/init.d/rtp2httpd restart 2>/dev/null || true
-  log "rtp2httpd 已 enable + restart（:5140，需在 LuCI 填 upstream_interface 才有节目源）"
+  log "rtp2httpd 已 enable + restart（:4022 唯一监听；需在 LuCI 填 upstream_interface 才有节目源）"
 else
   log "提示：rtp2httpd 未安装或非本机型，跳过"
 fi
+
+# ---------------------------------------------------------------------------
+# 3b) USB 打印 p910nd —— 默认启用（2026-11-26「插件一定要能正常用」）
+#     查 immortalwrt/packages net/p910nd/files/p910nd.init：
+#       start_p910nd() 是 `if [ "$enabled" -gt 0 ] && [ -e "$device" ]`
+#       —— **只有 /dev/usb/lp0 真实存在才开 procd 实例**，没插打印机时
+#       只是空跑一次 config_foreach，不会 respawn、不会刷日志。
+#     包自带 /etc/config/p910nd 是 `option enabled 0`，导致用户还得多做
+#     一步「插上打印机后去 LuCI 勾启用」。这里直接置 1 + enable：
+#     插上打印机即用（:9100），不影响无打印机机器。
+# ---------------------------------------------------------------------------
+if [ -x /etc/init.d/p910nd ]; then
+  if uci -q get p910nd.@p910nd[0] >/dev/null 2>&1; then
+    uci -q set p910nd.@p910nd[0].enabled='1'
+    uci -q commit p910nd
+  fi
+  /etc/init.d/p910nd enable 2>/dev/null || true
+  /etc/init.d/p910nd restart 2>/dev/null || true
+  log "p910nd 已默认启用（:9100；无打印机时 init 不启动实例，属正常）"
+fi
+
+# ---------------------------------------------------------------------------
+# 3c) 通用服务 enable 兜底 —— 覆盖「跨版本升级保留配置时 rc.d 链接丢失」
+#     只 enable、不 restart（避免打断已运行实例）；不存在就静默跳过。
+#     ⚠ 刻意不碰：passwall（无节点）、ddns（无 Oray 账号）、
+#       igmpproxy / omcproxy（组播上游二选一，同开会抢 IGMP 加入）。
+# ---------------------------------------------------------------------------
+for SVC in ttyd taskplan watchdog vantage nft-qos fastnet homebox rtp2httpd; do
+  if [ -x "/etc/init.d/$SVC" ]; then
+    /etc/init.d/"$SVC" enable 2>/dev/null || true
+  fi
+done
+log "通用服务 enable 兜底完成（ttyd / taskplan / watchdog / vantage / nft-qos / fastnet / homebox / rtp2httpd）"
 
 # ---------------------------------------------------------------------------
 # 4) 统一 reload 一次：让 99-zz-igmp-snooping 注册的组播放行 include
@@ -91,12 +130,12 @@ if command -v fw4 >/dev/null 2>&1; then
 fi
 
 # ---------------------------------------------------------------------------
-# 5) 说明：p910nd / USB 打印保持「插上打印机后在 LuCI 启用」
-#    —— 官方默认 disabled，空转会在无打印机时反复 respawn 刷日志，
-#      故不强制自启；LuCI「服务 → USB 打印服务器」勾选启用即可。
-#    DDNS 花生壳默认 enabled=0：要先填 Oray 账号/密码/域名。
-#    PassWall 默认 enabled=0：要先填订阅并选节点。
-#    igmpproxy / omcproxy：组播上游二选一，不自动启用，避免抢 IGMP 加入。
+# 5) 说明：以下四项**按设计需用户配置**，不自动启用（不是故障）
+#    · PassWall 默认 enabled=0：要先填订阅并选节点
+#    · 花生壳 DDNS 默认 enabled=0：要先填 Oray 账号/密码/域名
+#    · igmpproxy / omcproxy：组播上游二选一，同开会抢 IGMP 加入
+#    · rtp2httpd 节目源：服务已在 :4022，但要填 upstream_interface 才有内容
+#    USB 打印 p910nd 已于 3b 默认启用（插上打印机即用 :9100）。
 # ---------------------------------------------------------------------------
-log "服务自启兜底完成（cron / sysntpd / rtp2httpd 已保障；其余按设计需用户配置）"
+log "服务自启兜底完成（cron / sysntpd / rtp2httpd:4022 / p910nd / miaplus / Homebox 均已保障）"
 exit 0

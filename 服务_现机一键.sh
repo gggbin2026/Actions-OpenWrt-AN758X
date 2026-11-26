@@ -181,7 +181,7 @@ echo "  节点段  = $(uci show passwall 2>/dev/null | grep -c '=nodes') 个"
 echo "  ⚠ 没节点就不会启动代理：服务 → PassWall → 节点订阅(填订阅URL并更新)"
 echo "       → 节点列表(选一个) → 基本设置(勾「启用」) → 等 10~30 秒刷新"
 echo "  首页「GitHub 连接失败」是浏览器直连测试，不是 PassWall 状态，不用管"
-echo "  详细三步见仓库 PassWall_启用引导.md"
+echo "  详细三步见仓库 固件修复与配置总览.md 附录 A"
 echo "  日志：logread -e PSW | tail -40"
 echo
 
@@ -218,18 +218,33 @@ fi
 if [ -x /etc/init.d/rtp2httpd ]; then
   if [ -f /etc/config/rtp2httpd ]; then
     uci -q set rtp2httpd.@rtp2httpd[0].disabled='0'
-    uci -q del_list rtp2httpd.@rtp2httpd[0].listen='5140' 2>/dev/null || true
-    uci -q add_list rtp2httpd.@rtp2httpd[0].listen='5140'
+    # 删整个 listen 列表再写唯一值：清掉旧端口以及任何残留监听
+    uci -q delete rtp2httpd.@rtp2httpd[0].listen 2>/dev/null || true
+    uci -q add_list rtp2httpd.@rtp2httpd[0].listen='4022'
     uci -q commit rtp2httpd
   fi
   /etc/init.d/rtp2httpd enable 2>/dev/null || true
   /etc/init.d/rtp2httpd restart 2>/dev/null || true
-  echo -n "  rtp2httpd    : "; pidof rtp2httpd >/dev/null 2>&1 && echo "✅ 运行中 (:5140)" || echo "⚠ 未起（查 logread -e rtp2httpd）"
+  echo -n "  rtp2httpd    : "; pidof rtp2httpd >/dev/null 2>&1 && echo "✅ 运行中 (:4022)" || echo "⚠ 未起（查 logread -e rtp2httpd）"
 else
   echo "  rtp2httpd    : 未安装，跳过"
 fi
+# USB 打印：包默认 disabled=0，改成开箱即用（无打印机时 init 不启动实例，安全）
+if [ -x /etc/init.d/p910nd ]; then
+  if uci -q get p910nd.@p910nd[0] >/dev/null 2>&1; then
+    uci -q set p910nd.@p910nd[0].enabled='1'
+    uci -q commit p910nd
+  fi
+  /etc/init.d/p910nd enable 2>/dev/null || true
+  /etc/init.d/p910nd restart 2>/dev/null || true
+  echo "  p910nd       : ✅ 已默认启用（插上打印机即用 :9100）"
+fi
+for SVC in ttyd taskplan watchdog vantage nft-qos fastnet homebox; do
+  [ -x "/etc/init.d/$SVC" ] && /etc/init.d/"$SVC" enable 2>/dev/null || true
+done
 # 统一 reload：让组播放行 include 生效
 command -v fw4 >/dev/null 2>&1 && fw4 reload >/dev/null 2>&1 && echo "  ✅ fw4 reload：rogue_dhcp / multicast_allow 两条 include 已加载"
 echo
 echo "  仍需手动配置：PassWall（订阅→选节点→勾启用）、花生壳 DDNS（Oray 账号）、"
-echo "                USB 打印（插打印机后在 LuCI 启用）、igmpproxy/omcproxy（组播上游二选一）"
+echo "                igmpproxy/omcproxy（组播上游二选一）、rtp2httpd 节目源（upstream_interface）"
+echo "  USB 打印 p910nd 已默认启用，插上打印机即用 :9100"
