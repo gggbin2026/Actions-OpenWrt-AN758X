@@ -754,37 +754,93 @@ fi
 # --- fastnet（LinEase / iStoreOS 生态）---------------------------------
 # luci-app-fastnet 的 LUCI_DEPENDS := +fastnet +luci-lib-linkeaseauth
 #                                   +linkease-app-entry
-# 四个包分属两个仓库，缺一个 defconfig 就会把 =y 静默剔除：
-#   linkease/nas-packages         network/services/{fastnet,linkease-app-entry}
-#   linkease/nas-packages-luci    luci/{luci-app-fastnet,luci-lib-linkeaseauth}
+# 四个包分属三个仓库，缺一个 defconfig 就会把 =y 静默剔除：
+#   linkease/openwrt-app-actions   applications/{fastnet,luci-app-fastnet}   ★ 2026-11-26 起
+#   linkease/nas-packages         network/services/linkease-app-entry
+#   linkease/nas-packages-luci    luci/luci-lib-linkeaseauth
 # fastnet 本体是预编译二进制（从 istoreos-app-hub Releases 下载），
 # DEPENDS := @(arm||x86_64||aarch64) +linkease-app-entry；AN758x 为 aarch64，满足。
-# linkease-app-entry 再依赖 ca-bundle + luci-lib-linkeaseauth，均在 feeds/本段内。
+#
+# ★ 2026-11-26 run #40 根治 → v18 改为直连上游新仓库（不再锁 sha）：
+#   上游 08:30 UTC 两个删除提交把 fastnet / luci-app-fastnet 的构建源码
+#   从 nas-packages / nas-packages-luci 整个迁到 "app actions"：
+#     linkease/nas-packages      2d36b43 "move fastnet builds"
+#     linkease/nas-packages-luci aa7d738 "move luci build to app actions"
+#   新地址实测：linkease/openwrt-app-actions 的 applications/ 下两包齐全
+#   （43 个文件，Makefile / files / luasrc / po / quickstart 全在），
+#   且比删除前快照更新：PKG_RELEASE 3→4、LuCI 0.8.10-r1→r2、
+#   postinst 注册脚本失败不再中断安装（printf + exit 0）。
+#
+#   ⚠ linkease-app-entry / luci-lib-linkeaseauth **没有被迁走**，也不在新仓库里：
+#     全局 tree 搜过，openwrt-app-actions 里 0 命中；两者仍只在各自旧仓库
+#     当前分支（3.0.24 / 1.2.1-r5，Makefile 完好）。新 Makefile 的 DEPENDS
+#     仍硬依赖它们，所以下面保留这两次普通 clone（分支尖端，无 sha）。
+#     这就是「去掉 sha」后仍要拉旧仓库的原因，不是漏改。
+#
+#   维护出口：上游若把两个依赖包也搬走 → 改下面两个 clone 的 URL / 路径；
+#   若决定不要 FastNet → ADD_FASTNET=false + 删两份 config 的 4 行 =y +
+#   删 workflow 745 行必留反查，三处一起改。
 # ------------------------------------------------------------------------
 if [ "$ADD_FASTNET" = "true" ]; then
+  APPACT_TMP="$(mktemp -d)/openwrt-app-actions"
   NAS_TMP="$(mktemp -d)/nas-packages"
   LUCI_TMP="$(mktemp -d)/nas-packages-luci"
-  if clone https://github.com/linkease/nas-packages "$NAS_TMP" master \
-     && clone https://github.com/linkease/nas-packages-luci "$LUCI_TMP" main; then
-    for p in fastnet linkease-app-entry; do
-      if [ -f "$NAS_TMP/network/services/$p/Makefile" ]; then
-        rm -rf "$PKG_DIR/$p" && cp -r "$NAS_TMP/network/services/$p" "$PKG_DIR/"
-        echo "✅ 已拷贝: $p"
+  FASTNET_MISS=""
+
+  # ① 新构建源码：applications/ 下两个包
+  if clone https://github.com/linkease/openwrt-app-actions "$APPACT_TMP" main; then
+    for p in fastnet luci-app-fastnet; do
+      if [ -f "$APPACT_TMP/applications/$p/Makefile" ]; then
+        rm -rf "$PKG_DIR/$p" && cp -r "$APPACT_TMP/applications/$p" "$PKG_DIR/"
+        echo "✅ 已拷贝: $p（openwrt-app-actions/applications，直连 main）"
       else
-        echo "::error::nas-packages 里缺 network/services/$p（fastnet 依赖链断）"
-      fi
-    done
-    for p in luci-app-fastnet luci-lib-linkeaseauth; do
-      if [ -f "$LUCI_TMP/luci/$p/Makefile" ]; then
-        rm -rf "$PKG_DIR/$p" && cp -r "$LUCI_TMP/luci/$p" "$PKG_DIR/"
-        echo "✅ 已拷贝: $p"
-      else
-        echo "::error::nas-packages-luci 里缺 luci/$p（fastnet 依赖链断）"
+        echo "::error::openwrt-app-actions 里缺 applications/$p/Makefile（fastnet 新构建源码）"
+        FASTNET_MISS="$FASTNET_MISS $p"
       fi
     done
   else
-    echo "::error::fastnet 依赖仓库拉取失败（不影响其余插件）"
+    echo "::error::openwrt-app-actions 拉取失败（fastnet / luci-app-fastnet 的现地址）"
+    FASTNET_MISS="$FASTNET_MISS fastnet luci-app-fastnet"
   fi
+
+  # ② 依赖包 linkease-app-entry（未被迁移，仍在旧仓库 network/services/）
+  if clone https://github.com/linkease/nas-packages "$NAS_TMP" master; then
+    if [ -f "$NAS_TMP/network/services/linkease-app-entry/Makefile" ]; then
+      rm -rf "$PKG_DIR/linkease-app-entry" \
+        && cp -r "$NAS_TMP/network/services/linkease-app-entry" "$PKG_DIR/"
+      echo "✅ 已拷贝: linkease-app-entry（nas-packages/network/services，分支尖端）"
+    else
+      echo "::error::nas-packages 里缺 network/services/linkease-app-entry/Makefile"
+      FASTNET_MISS="$FASTNET_MISS linkease-app-entry"
+    fi
+  else
+    echo "::error::nas-packages 拉取失败（linkease-app-entry）"
+    FASTNET_MISS="$FASTNET_MISS linkease-app-entry"
+  fi
+
+  # ③ 依赖包 luci-lib-linkeaseauth（未被迁移，仍在旧仓库 luci/）
+  if clone https://github.com/linkease/nas-packages-luci "$LUCI_TMP" main; then
+    if [ -f "$LUCI_TMP/luci/luci-lib-linkeaseauth/Makefile" ]; then
+      rm -rf "$PKG_DIR/luci-lib-linkeaseauth" \
+        && cp -r "$LUCI_TMP/luci/luci-lib-linkeaseauth" "$PKG_DIR/"
+      echo "✅ 已拷贝: luci-lib-linkeaseauth（nas-packages-luci/luci，分支尖端）"
+    else
+      echo "::error::nas-packages-luci 里缺 luci/luci-lib-linkeaseauth/Makefile"
+      FASTNET_MISS="$FASTNET_MISS luci-lib-linkeaseauth"
+    fi
+  else
+    echo "::error::nas-packages-luci 拉取失败（luci-lib-linkeaseauth）"
+    FASTNET_MISS="$FASTNET_MISS luci-lib-linkeaseauth"
+  fi
+
+  if [ -n "$FASTNET_MISS" ]; then
+    echo "::error::fastnet 依赖链缺包:$FASTNET_MISS —— 四个 =y 会被 defconfig 静默剔除，直接早退"
+    echo "  新构建源码: linkease/openwrt-app-actions 的 applications/{fastnet,luci-app-fastnet}"
+    echo "  两个依赖包: nas-packages/network/services/linkease-app-entry、"
+    echo "              nas-packages-luci/luci/luci-lib-linkeaseauth（均未被迁移）"
+    exit 1
+  fi
+  echo "✅ fastnet 四包依赖链齐备（直连上游新仓库 applications/ + 两个未迁移依赖包，无 sha 锁定）"
 fi
 # --- luci-theme-fluent ---
 # ⚠ 包在仓库的 package/ 子目录下，不能直接 clone 到 package/custom，
