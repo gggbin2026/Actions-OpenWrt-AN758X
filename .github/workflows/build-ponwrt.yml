@@ -816,7 +816,7 @@ jobs:
           #   br-lan 里既有有线 LAN 口也有 WiFi 的 phy*-ap*，所以无线客户端
           #   私开 DHCP 一样被挡；本机 dnsmasq 的响应走 local output，不进
           #   prerouting，不会误杀。
-          #   include 用 position=ruleset-pre，fw4 reload 时随 ruleset 重放，
+          #   include 用 position=ruleset-prepend，fw4 reload 时随 ruleset 重放，
           #   nft 文件里 `table` + `flush table` 防重复定义。
           # ---------------------------------------------------------------
           DHCP_NFT="files/etc/rogue-dhcp.nft"
@@ -833,7 +833,12 @@ jobs:
               exit 1
             fi
           done
-          for kw in "position='ruleset-pre'" "type='nftables'" 'rogue-dhcp.nft'; do
+          # 2026-11-26 修正（run #38）：v13 把 uci-defaults 里的 position 从
+          #   `ruleset-pre` 改成 fw4 规范值 `ruleset-prepend`，但这里的硬校验
+          #   关键字没同步 → `grep -qF "position='ruleset-pre'"` 精确串不匹配
+          #   → ::error:: 缺 include 配置 → #18 exit 1，整轮编译 8 分钟就挂。
+          #   改成规范值；下方「服务自启核查」仍保留对旧值的 warning 反查。
+          for kw in "position='ruleset-prepend'" "type='nftables'" 'rogue-dhcp.nft'; do
             if ! grep -qF "$kw" "$DHCP_UCID"; then
               echo "::error::$DHCP_UCID 缺少 include 配置: $kw"
               exit 1
