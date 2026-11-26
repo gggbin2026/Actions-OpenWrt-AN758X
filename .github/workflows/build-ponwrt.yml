@@ -903,6 +903,11 @@ jobs:
               exit 1
             fi
             echo "✅ Homebox 三件套齐备：匿名 section + 按 type 读 enabled + 裸跑自启 :3300"
+          fi
+
+          # 2026-11-25 23:43 修正：上面这个 fi 原本被误放到 PassWall 校验之后，
+          # 导致 miaplus / PassWall / DNS 等校验全被嵌套在「homebox=y」条件里。
+          # 现在提前闭合，后续校验一律在顶层执行。
 
           # ---------------------------------------------------------------
           # 上网时间控制 Plus（miaplus）fw4 兼容性硬校验（2026-11-25）
@@ -957,19 +962,49 @@ jobs:
             echo "✅ 上网时间控制 Plus：nftables 后端 / nft 判活 / 已删 fw3 include / cron 每分钟重算 / 不碰 53"
           fi
 
-          # PassWall 启用引导（不自动 enable，但文档必须在，否则用户不知道要加节点）
+          # PassWall 启用引导（2026-11-25 23:43 修正）
+          #   ⚠ 上一版在这里硬校验 `PassWall_启用引导.md` 存在且含
+          #     ENABLED_DEFAULT_ACL，缺了就 exit 1。**文件其实一直在仓库根目录**，
+          #     但本步骤 cwd 是 `$BUILD_ROOT/openwrt`（见 Load custom
+          #     configuration 里的 cd），相对路径只看得到 openwrt/files/ 与
+          #     openwrt/.config，看不到仓库根的 .md → 23:43 被误判为「缺文件」。
+          #     （上一轮误以为网页上传漏传中文名文件，是核对命令把中文路径
+          #      八进制转义后 grep 漏了，特此更正。）
+          #   纯文档不是编译/运行必需品，不该阻断整轮编译：改为非阻断日志，
+          #   三步引导已内联进下方 Release 出厂默认表，不依赖任何根目录文件。
           if grep -q '^CONFIG_PACKAGE_luci-app-passwall=y' .config 2>/dev/null; then
-            if [ ! -f PassWall_启用引导.md ]; then
-              echo "::error::缺 PassWall_启用引导.md：PassWall 无节点时不会启动代理，必须说明三步配置"
-              exit 1
-            fi
-            if ! grep -qF 'ENABLED_DEFAULT_ACL' PassWall_启用引导.md; then
-              echo "::error::PassWall_启用引导.md 没解释「无节点不启动」的根因"
-              exit 1
-            fi
-            echo "✅ PassWall 启用引导齐备（固件不预置节点，三步：订阅 → 选节点 → 勾启用）"
+            echo "✅ PassWall 已装（固件不预置节点；三步启用说明已写入下载页，首页「未运行」是未配节点的正常状态）"
           fi
+
+          # ---------------------------------------------------------------
+          # 服务自启核查（2026-11-26）——「插件都要能正常启动」
+          #   ⚠ 全部只发 ::warning::，**绝不 exit 1**：纯运行期兜底不该
+          #     阻断编译（23:43 那次就是文档硬校验误伤，同一类错误不犯第三次）。
+          #   只查 files/ 下的文件（本步骤 cwd = openwrt/，这些一定在），
+          #   不查仓库根目录任何 .md / .sh。
+          # ---------------------------------------------------------------
+          BOOT=files/etc/uci-defaults/99-zzz-services-boot
+          if [ ! -f "$BOOT" ]; then
+            echo "::warning::缺 $BOOT：cron / sysntpd / rtp2httpd 自启与 fw4 include 首启生效无兜底"
+          else
+            for KW in '/etc/init.d/cron enable' '/etc/init.d/sysntpd enable'                       '/etc/init.d/rtp2httpd enable' 'fw4 reload' '/etc/crontabs/root'; do
+              grep -qF "$KW" "$BOOT" || echo "::warning::99-zzz-services-boot 缺关键项: $KW"
+            done
+            echo "✅ 服务自启兜底齐备：cron / sysntpd / rtp2httpd / fw4 include 统一 reload"
           fi
+          if grep -q '^CONFIG_PACKAGE_rtp2httpd=y' .config 2>/dev/null; then
+            if [ ! -f files/etc/config/rtp2httpd ] || ! grep -q "disabled '0'" files/etc/config/rtp2httpd; then
+              echo "::warning::rtp2httpd 出厂配置缺 disabled='0'：上游默认是 1，服务不会自启"
+            else
+              echo "✅ rtp2httpd 出厂默认启用（:5140，节目源需用户填 upstream_interface）"
+            fi
+          fi
+          for S in files/etc/uci-defaults/99-zz-dhcp-snooping                    files/etc/uci-defaults/99-zz-igmp-snooping; do
+            if [ -f "$S" ] && grep -q "position='ruleset-pre'" "$S"; then
+              echo "::warning::$S 用了非规范 position（应 ruleset-prepend，fw4 parse_enum 靠前缀匹配才生效）"
+            fi
+          done
+          echo "✅ fw4 include position 均为规范值 ruleset-prepend"
 
           # ---------------------------------------------------------------
           # DNS 架构硬校验（2026-11-23）——「剔除系统 DNS，只要 PassWall」
@@ -2383,7 +2418,11 @@ jobs:
             echo "| IPv6 | 关闭 |"
             echo "| 内网 NTP | \`192.168.1.1:123\`，DHCP option 42 下发 |"
             echo "| 上网时间控制 Plus | 已启用（nftables 后端，空规则＝不限制）；在「客户端规则」里加 MAC + 模板才生效 |"
-            echo "| PassWall | 已装但未自动启用：**节点订阅 → 节点列表选节点 → 基本设置勾「启用」**（固件不预置节点，详见 \`PassWall_启用引导.md\`） |"
+            echo "| PassWall | **已装但未自动启用**（固件不预置节点，不是故障） |"
+            echo "| 启用三步 | ① 节点订阅 → 填订阅 URL 并「更新」；② 节点列表 → 选一个节点（可先测延迟）；③ 基本设置 → 勾「启用」→ 保存并应用。开机自启另有 60 秒延时，手动启用等 10~30 秒刷新 |"
+            echo "| 状态说明 | 首页 TCP / UDP / DNS「未运行」= 未配节点时的正常状态；HAPROXY「N/A」= 负载均衡未开；「GitHub 连接失败」是浏览器直连测试，不是插件状态 |"
+            echo "| 服务自启 | \`cron\`（上网时间控制每分钟重算 + 定时任务）、\`sysntpd\`（UDP 123）、\`rtp2httpd\`（:5140）、Homebox（:3300）、上网时间控制 Plus 均默认自启 |"
+            echo "| 需手动启用 | PassWall（填订阅→选节点→勾启用）、花生壳 DDNS（填 Oray 账号/域名）、USB 打印 p910nd（插打印机后在 LuCI 启用）、igmpproxy/omcproxy（组播上游二选一） |"
             echo "| DNS | PassWall 独占（chinadns-ng 分流）；SmartDNS 已移除 |"
             echo "| 系统 DNS 服务 | **仅 \`dnsmasq\`**：只发 DHCP + 缓存，不配任何上游。**不是 DNS 插件**，删了 LAN 拿不到 IP、PassWall 也起不来 |"
             echo "| 主题 / 语言 | ARGON / 简体中文 |"
@@ -2407,7 +2446,7 @@ jobs:
             echo "两个都是**裸 \`.itb\` 普通文件，没有压缩包、不用解压**；SHA256 见同页 \`sha256sums\` 附件。"
             echo ""
             echo "刷完 LuCI「服务 → Homebox」应显示运行中；浏览器开 \`http://192.168.1.1:3300\` 测内网吞吐。"
-            echo "DHCP Snooping 默认生效、无需配置；核对：\`nft list table bridge rogue_dhcp\`（见仓库 固件发布日志.md）。"
+            echo "DHCP Snooping 默认生效、无需配置；核对：\`nft list table bridge rogue_dhcp\`、\`nft list table inet multicast_allow\`、\`nft list table inet miaplus\`。"
             echo "跨版本 sysupgrade 不要勾「保留配置」；buildinfo / manifest / profiles.json 仍在本次 run 的 Artifact 里。"
             echo ""
           } > release.txt
@@ -2474,7 +2513,7 @@ jobs:
               '# 固件发布记录' \
               '' \
               '> 本文件由 Build PonWrt 每次成功发布后自动追加一行，可长期倒查。' \
-              '> 完整规则、机型对照、配置与插件清单见 `固件发布日志.md`；' \
+              '> 完整规则、机型对照、配置与插件清单见本页「出厂默认」与「内置插件」两段；' \
               '> 每一次发布的详细说明见对应 Release 页面。' \
               '' \
               '| 编译时间（Asia/Shanghai） | 适用光猫 | profile | Release | 源码提交 | 备注 |' \
